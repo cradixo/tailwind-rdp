@@ -1,9 +1,8 @@
-name: RDP-Static-Persistent-Advanced
+name: RDP-Static-Persistent-Corrected
 
 env:
   TZ: 'Asia/Kolkata'
-  # A unique key for the user settings. Change this to reset the cache.
-  CACHE_KEY: rdp-user-settings-v8
+  CACHE_KEY: rdp-user-settings-v9 # Increment the key to ensure a fresh start
 
 on:
   workflow_dispatch:
@@ -14,106 +13,88 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: "[SETUP 1/7] Checkout for Git Operations"
-        # We need to checkout the repo to use git commands if storing backups in another repo.
-        uses: actions/checkout@v4
-
-      - name: "[SETUP 2/7] Forcefully Cleanup Stale Tailscale Device via API"
+      # Steps 1-3 remain the same (Checkout, Cleanup Tailscale, Restore Cache)
+      - name: "[SETUP 1/7] Forcefully Cleanup Stale Tailscale Device via API"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
+          # Same PowerShell script as before to clear old device entries
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try {
             $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers
           } catch {
-            Write-Error "API call failed. Please verify your TAILSCALE_TAILNET secret and ensure your API Key has Read/Write permissions."
+            Write-Error "API call failed. Please verify your TAILSCALE_TAILNET secret and API Key permissions."
             exit 1
           }
           $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
           if ($device) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Found old device '$($device.hostname)'. Deleting it."
-            $deleteUri = "https://api.tailscale.com/api/v2/device/$($device.id)"
-            Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $headers
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Device deleted successfully."
+            Write-Host "Found and deleting old device '$($device.hostname)'."
+            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No previous device named '$($env:HOSTNAME)' found."
+            Write-Host "No previous device named '$($env:HOSTNAME)' found."
           }
 
-      - name: "[SETUP 3/7] Restore Cache to Staging Area"
+      - name: "[SETUP 2/7] Restore Cache to Staging Area"
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: D:\a\staging
           key: ${{ env.CACHE_KEY }}
 
-      - name: "[SETUP 4/7] Configure Windows RDP"
+      - name: "[SETUP 3/7] Configure Windows RDP"
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force; netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: "[SETUP 5/7] Create RDP User and Apply Settings"
+      - name: "[SETUP 4/7] Create RDP User and Apply Settings"
         env:
           CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
+          RDP_USER: "cardersparadox"
+          RDP_PASS: "Carding.Git!2024"
         run: |
-          $username = "cardersparadox"
-          $password = "Carding.Git!2024"
-          $userProfile = "C:\Users\$username"
+          $userProfile = "C:\Users\$($env:RDP_USER)"
           $stagingPath = "D:\a\staging"
-
-          New-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force) -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-
+          
+          New-LocalUser -Name $env:RDP_USER -Password (ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force) -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
+          
           if ($env:CACHE_HIT -eq 'true' -and (Test-Path "$stagingPath\user_settings.reg")) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Applying restored settings..."
-
-            # ADVANCED CHECK: Wait for the user's explorer.exe process to start.
+            Write-Host "Cache hit. Applying restored settings..."
             $retries = 0
-            while (-not (Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName.EndsWith($username) }) -and $retries -lt 60) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Waiting for user profile shell to initialize..."
-              Start-Sleep -Seconds 2
-              $retries++
+            while (-not (Test-Path "$userProfile\Desktop") -and $retries -lt 30) {
+              Write-Host "Waiting for user profile to initialize..."
+              Start-Sleep -Seconds 2; $retries++
             }
-
-            if (Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName.EndsWith($username) }) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Profile is active. Copying files and importing registry..."
-
-              # Stop explorer to safely apply settings
-              Stop-Process -Name explorer -Force
-
-              # Restore files first
+            if (Test-Path "$userProfile\Desktop") {
+              Write-Host "Profile is active. Copying restored files and importing registry..."
+              # Copy files FIRST
               Copy-Item -Path "$stagingPath\Desktop" -Destination $userProfile -Recurse -Force -ErrorAction SilentlyContinue
               Copy-Item -Path "$stagingPath\Edge" -Destination "$userProfile\AppData\Local\Microsoft" -Recurse -Force -ErrorAction SilentlyContinue
-
-              # Restore registry settings
-              # Running this as the SYSTEM user to modify another user's hive
+              # Run reg import as SYSTEM. This correctly applies settings to the user's hive.
               reg import "$stagingPath\user_settings.reg"
-              
-              # Restart explorer to apply changes
-              Start-Process -FilePath "explorer.exe"
-
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied successfully."
+              Write-Host "Settings applied successfully."
             } else {
-              Write-Warning "[$(Get-Date -Format 'HH:mm:ss')] User profile did not initialize in time. Skipping cache application."
+              Write-Warning "User profile did not initialize in time. Skipping cache application."
             }
           } else {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No cache found or cache is invalid. Starting with a fresh profile."
+            Write-Host "No cache found. Starting with a fresh profile."
           }
-          echo "RDP_USER=$username" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+          echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 6/7] Install and Connect Tailscale"
+      - name: "[SETUP 5/7] Install and Connect Tailscale"
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
+          Start-Sleep -s 5
           $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          if (-not $tsIP) { Start-Sleep -s 10; $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 }
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: "[ACTIVE 7/7] Maintain Session and Auto-Save"
+      
+      - name: "[ACTIVE 6/7] Setup Background Backup and Maintain Session"
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
@@ -121,47 +102,51 @@ jobs:
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "======================================================"
-
-          $userProfilePath = "C:\Users\cardersparadox"
+          
+          # Define paths and settings for the backup task
           $stagingPath = "D:\a\staging"
+          $userProfilePath = "C:\Users\$($env:RDP_USER)"
           $edgeDataPath = "$userProfilePath\AppData\Local\Microsoft\Edge"
           $desktopPath = "$userProfilePath\Desktop"
+          $backupScriptPath = "D:\a\backup.ps1"
 
-          # More reasonable backup interval (e.g., 60 seconds)
-          $backupIntervalSeconds = 60
+          # Define Edge directories to exclude for a smaller, faster backup
+          $excludeDirs = @(
+              "`"$edgeDataPath\User Data\Default\Cache`"",
+              "`"$edgeDataPath\User Data\Default\Code Cache`"",
+              "`"$edgeDataPath\User Data\Default\Service Worker\CacheStorage`""
+          ) -join ' '
+
+          # Create the PowerShell script that the scheduled task will execute
+          # This script runs IN THE USER'S CONTEXT, which is key
+          $scriptContent = @"
+          # Backup Registry - HKCU correctly points to this user's hive
+          reg export HKCU `"$stagingPath\user_settings.reg`" /y
           
-          while ($true) {
-            Start-Sleep -Seconds $backupIntervalSeconds
-            
-            # Switch to the user's context to ensure correct registry export
-            # This requires a bit more setup, so for simplicity in Actions, we run as the current user which has admin rights
-            # and can access the necessary registry hive locations.
-            
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings to staging area..."
+          # Backup Desktop files
+          robocopy `"$desktopPath`" `"$stagingPath\Desktop`" /E /PURGE /R:1 /W:1
+          
+          # Backup Edge data, excluding cache folders
+          robocopy `"$edgeDataPath`" `"$stagingPath\Edge`" /E /PURGE /XD $excludeDirs /R:1 /W:1
+          "@
+          $scriptContent | Out-File -FilePath $backupScriptPath -Encoding utf8
 
-            # Backup Desktop
-            robocopy $desktopPath "$stagingPath\Desktop" /E /PURGE /R:1 /W:1 | Out-Null
-            
-            # Backup Edge Data (excluding caches)
-            $excludeDirs = @(
-                "$edgeDataPath\User Data\Default\Cache",
-                "$edgeDataPath\User Data\Default\Code Cache",
-                "$edgeDataPath\User Data\Default\Service Worker\CacheStorage"
-            )
-            robocopy $edgeDataPath "$stagingPath\Edge" /E /PURGE /XD $excludeDirs /R:1 /W:1 | Out-Null
-            
-            # SAFER BACKUP: Export the Current User's registry hive instead of copying NTUSER.DAT
-            # We need to run this within the user's context for HKCU to be correct.
-            # A workaround is to load the user's hive temporarily.
-            reg load HKLM\user_temp "$userProfilePath\NTUSER.DAT"
-            reg export HKLM\user_temp "$stagingPath\user_settings.reg" /y
-            reg unload HKLM\user_temp
-            
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Save complete."
+          # Create a Scheduled Task to run the backup script as the RDP user
+          $taskName = "UserSyncBackup"
+          $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$backupScriptPath`""
+          $taskTrigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 2) -Once -At (Get-Date)
+          Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -User $env:RDP_USER -Password $env:RDP_PASS -RunLevel Highest -Force
+
+          Write-Host "SUCCESS: Scheduled task '$taskName' created. It will now back up user settings every 2 minutes."
+          
+          # Keep the main workflow step alive. The real work is done by the background task.
+          while ($true) {
+            Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session active. Background backup task is running."
           }
           
-      - name: Save Staged Settings to Cache
-        if: always()
+      - name: "[SAVE 7/7] Save Staged Settings to Cache"
+        if: always() # This ensures it runs even if the workflow is cancelled
         uses: actions/cache/save@v4
         with:
           path: D:\a\staging
