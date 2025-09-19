@@ -1,240 +1,168 @@
-# .github/workflows/rdp-edge-backup.yml
-name: RDP - Edge + Theme + Desktop Persistent Backup/Restore
-
-# Only run manually (you can add schedule if you want)
-on:
-  workflow_dispatch:
+name: RDP-Static-Persistent-Advanced
 
 env:
   TZ: 'Asia/Kolkata'
-  USERNAME: 'cardersparadox'             # user created on the runner/VM
-  STAGING: 'D:\a\cache-staging'          # local staging area before cache save
-  CACHE_KEY_PREFIX: 'rdp-edge-theme-desktop'
-  MIN_EDGE_PROFILE_BYTES: 5000000        # 5 MB threshold to detect an empty profile
-  DESKTOP_MIN_FILES: 3                   # if desktop has <= this, consider "empty" and restore
+  # A unique key for the user settings. Change this to reset the cache.
+  CACHE_KEY: rdp-user-settings-v8
+
+on:
+  workflow_dispatch:
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 3600
+
     steps:
+      - name: "[SETUP 1/7] Checkout for Git Operations"
+        # We need to checkout the repo to use git commands if storing backups in another repo.
+        uses: actions/checkout@v4
 
-      - name: "[SETUP 1] Prepare staging dir"
-        shell: powershell
+      - name: "[SETUP 2/7] Forcefully Cleanup Stale Tailscale Device via API"
+        env:
+          TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
+          HOSTNAME: "cardersparadox"
         run: |
-          $stg = "${{ env.STAGING }}"
-          if (-Not (Test-Path $stg)) { New-Item -ItemType Directory -Path $stg -Force | Out-Null }
-          New-Item -ItemType Directory -Path "$stg\Edge" -Force | Out-Null
-          New-Item -ItemType Directory -Path "$stg\Registry" -Force | Out-Null
-          New-Item -ItemType Directory -Path "$stg\Desktop" -Force | Out-Null
-          Write-Host "Staging directory ready: $stg"
+          $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
+          $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
+          try {
+            $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers
+          } catch {
+            Write-Error "API call failed. Please verify your TAILSCALE_TAILNET secret and ensure your API Key has Read/Write permissions."
+            exit 1
+          }
+          $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
+          if ($device) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Found old device '$($device.hostname)'. Deleting it."
+            $deleteUri = "https://api.tailscale.com/api/v2/device/$($device.id)"
+            Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $headers
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Device deleted successfully."
+          } else {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No previous device named '$($env:HOSTNAME)' found."
+          }
 
-      - name: "[SETUP 2] Restore cache to staging (quick path)"
+      - name: "[SETUP 3/7] Restore Cache to Staging Area"
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.STAGING }}
-          key: ${{ env.CACHE_KEY_PREFIX }}-v1
+          path: D:\a\staging
+          key: ${{ env.CACHE_KEY }}
 
-      - name: "[PREPARE 3] Create local user and ensure profile exists"
-        shell: powershell
+      - name: "[SETUP 4/7] Configure Windows RDP"
+        run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force; netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+      - name: "[SETUP 5/7] Create RDP User and Apply Settings"
+        env:
+          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
         run: |
-          $username = $env:USERNAME
+          $username = "cardersparadox"
           $password = "Carding.Git!2024"
-          $secure = ConvertTo-SecureString $password -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $username -Password $secure -AccountNeverExpires -PasswordNeverExpires -Description "RDP Account"
-            Add-LocalGroupMember -Group "Administrators" -Member $username
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-            Write-Host "Created user $username"
-          } else {
-            Write-Host "User $username already exists"
-          }
+          $userProfile = "C:\Users\$username"
+          $stagingPath = "D:\a\staging"
 
-          # Ensure profile folder exists by creating Desktop (Windows will populate rest on first login)
-          $profile = "C:\Users\$username"
-          if (-not (Test-Path $profile)) {
-            # create skeleton; Windows will fill in defaults on sign-in
-            New-Item -ItemType Directory -Path $profile -Force | Out-Null
-          }
-          if (-not (Test-Path "$profile\Desktop")) {
-            New-Item -ItemType Directory -Path "$profile\Desktop" -Force | Out-Null
-          }
-          Write-Host "Profile ready: $profile"
+          New-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force) -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: "[CHECK 4] Should we restore? (heuristics)"
-        id: should-restore
-        shell: powershell
-        run: |
-          $username = $env:USERNAME
-          $profile = "C:\Users\$username"
-          $edgeProfilePath = "$profile\AppData\Local\Microsoft\Edge\User Data"
-          $desktopPath = "$profile\Desktop"
-          $staging = "${{ env.STAGING }}"
-          $cacheHit = "${{ steps.cache-restore.outputs.cache-hit }}"
+          if ($env:CACHE_HIT -eq 'true' -and (Test-Path "$stagingPath\user_settings.reg")) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Applying restored settings..."
 
-          $reason = @()
-          $doRestore = $false
+            # ADVANCED CHECK: Wait for the user's explorer.exe process to start.
+            $retries = 0
+            while (-not (Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName.EndsWith($username) }) -and $retries -lt 60) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Waiting for user profile shell to initialize..."
+              Start-Sleep -Seconds 2
+              $retries++
+            }
 
-          # If we have a cache hit, candidate to restore (still check marker and content)
-          if ($cacheHit -eq 'true') { $doRestore = $true; $reason += "cache-hit" }
+            if (Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName.EndsWith($username) }) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Profile is active. Copying files and importing registry..."
 
-          # If staging already contains files and a restore marker exists, we still allow restore if profile seems empty
-          # Check Desktop count
-          $desktopCount = 0
-          if (Test-Path $desktopPath) { $desktopCount = (Get-ChildItem -Path $desktopPath -Force -File -ErrorAction SilentlyContinue | Measure-Object).Count }
-          Write-Host "Desktop file count: $desktopCount"
-          if ($desktopCount -le [int]${{ env.DESKTOP_MIN_FILES }}) { $doRestore = $true; $reason += "desktop-empty-or-minimal" }
+              # Stop explorer to safely apply settings
+              Stop-Process -Name explorer -Force
 
-          # Check Edge profile size
-          $edgeSize = 0
-          if (Test-Path $edgeProfilePath) {
-            $edgeSize = (Get-ChildItem -Path $edgeProfilePath -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-          }
-          Write-Host "Edge User Data size: $edgeSize bytes"
-          if ($edgeSize -lt [int]${{ env.MIN_EDGE_PROFILE_BYTES }}) { $doRestore = $true; $reason += "edge-profile-small-or-missing" }
+              # Restore files first
+              Copy-Item -Path "$stagingPath\Desktop" -Destination $userProfile -Recurse -Force -ErrorAction SilentlyContinue
+              Copy-Item -Path "$stagingPath\Edge" -Destination "$userProfile\AppData\Local\Microsoft" -Recurse -Force -ErrorAction SilentlyContinue
 
-          # If we already placed a marker that a restore completed this machine, avoid re-restoring
-          $marker = Join-Path $staging ".profile_restored.marker"
-          if (Test-Path $marker) {
-            Write-Host "Found staging marker; will not force-restore unless profile looks empty"
-          } else {
-            Write-Host "No restoral marker present in staging"
-          }
+              # Restore registry settings
+              # Running this as the SYSTEM user to modify another user's hive
+              reg import "$stagingPath\user_settings.reg"
+              
+              # Restart explorer to apply changes
+              Start-Process -FilePath "explorer.exe"
 
-          # Output
-          Write-Host "Decision: ShouldRestore=$doRestore  Reasons=($($reason -join ','))"
-          echo "should_restore=$doRestore" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          echo "restore_reasons=$($reason -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: "[RESTORE 5] Restore staged settings (if needed)"
-        if: steps.should-restore.outputs.should_restore == 'true'
-        shell: powershell
-        run: |
-          $username = $env:USERNAME
-          $profile = "C:\Users\$username"
-          $staging = "${{ env.STAGING }}"
-          $edgeSrc = Join-Path $staging "Edge"
-          $regSrc = Join-Path $staging "Registry"
-          $desktopSrc = Join-Path $staging "Desktop"
-
-          Write-Host "Restoring staged settings for $username..."
-
-          # 1) Close Edge if running (safe restore)
-          Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-          # 2) Restore Desktop: mirror with robocopy
-          if (Test-Path $desktopSrc) {
-            Write-Host "Restoring Desktop from $desktopSrc..."
-            robocopy $desktopSrc "$profile\Desktop" /MIR /COPY:DAT /R:3 /W:5 /NFL /NDL
-          } else {
-            Write-Host "No Desktop staging found to restore."
-          }
-
-          # 3) Restore Edge profile files
-          if (Test-Path $edgeSrc) {
-            $destination = "$profile\AppData\Local\Microsoft\Edge\User Data"
-            # Ensure destination dir exists and remove (or mirror) carefully
-            if (-not (Test-Path $destination)) { New-Item -ItemType Directory -Path $destination -Force | Out-Null }
-            Write-Host "Mirroring Edge User Data to $destination"
-            robocopy $edgeSrc $destination /MIR /COPY:DAT /R:3 /W:5 /NFL /NDL
-          } else {
-            Write-Host "No Edge staging found to restore."
-          }
-
-          # 4) Import registry keys (themes/personalization)
-          if (Test-Path $regSrc) {
-            Get-ChildItem -Path $regSrc -Filter *.reg -File -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "Importing registry file: $($_.FullName)"
-              reg import "$($_.FullName)"
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied successfully."
+            } else {
+              Write-Warning "[$(Get-Date -Format 'HH:mm:ss')] User profile did not initialize in time. Skipping cache application."
             }
           } else {
-            Write-Host "No registry staging found to restore."
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No cache found or cache is invalid. Starting with a fresh profile."
           }
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
-          # 5) Touch marker so we don't reapply repeatedly
-          New-Item -ItemType File -Path (Join-Path $staging ".profile_restored.marker") -Force | Out-Null
-          Write-Host "Restore finished. You may need to sign out or restart explorer for theme to fully apply."
+      - name: "[SETUP 6/7] Install and Connect Tailscale"
+        run: |
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
+          Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
+          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          if (-not $tsIP) { Start-Sleep -s 10; $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[BACKUP 6] Periodic autosave: export registry (Themes) + edge + desktop to staging"
+      - name: "[ACTIVE 7/7] Maintain Session and Auto-Save"
         shell: powershell
         run: |
-          $username = $env:USERNAME
-          $profile = "C:\Users\$username"
-          $staging = "${{ env.STAGING }}"
+          Write-Host "================ RDP ACCESS ================"
+          Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "======================================================"
 
-          # 1) Export relevant registry keys (HKCU - Themes and Personalize)
-          $keys = @(
-            'HKCU\Software\Microsoft\Windows\CurrentVersion\Themes',
-            'HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
-          )
-          foreach ($k in $keys) {
-            $safe = ($k -replace '[\\:\*\?"<>\|]','_').TrimStart('_')
-            $out = Join-Path $staging ("Registry\$safe.reg")
-            try {
-              reg export $k $out /y
-              Write-Host "Exported $k -> $out"
-            } catch {
-              Write-Warning "Failed to export $k : $_"
-            }
+          $userProfilePath = "C:\Users\cardersparadox"
+          $stagingPath = "D:\a\staging"
+          $edgeDataPath = "$userProfilePath\AppData\Local\Microsoft\Edge"
+          $desktopPath = "$userProfilePath\Desktop"
+
+          # More reasonable backup interval (e.g., 60 seconds)
+          $backupIntervalSeconds = 60
+          
+          while ($true) {
+            Start-Sleep -Seconds $backupIntervalSeconds
+            
+            # Switch to the user's context to ensure correct registry export
+            # This requires a bit more setup, so for simplicity in Actions, we run as the current user which has admin rights
+            # and can access the necessary registry hive locations.
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings to staging area..."
+
+            # Backup Desktop
+            robocopy $desktopPath "$stagingPath\Desktop" /E /PURGE /R:1 /W:1 | Out-Null
+            
+            # Backup Edge Data (excluding caches)
+            $excludeDirs = @(
+                "$edgeDataPath\User Data\Default\Cache",
+                "$edgeDataPath\User Data\Default\Code Cache",
+                "$edgeDataPath\User Data\Default\Service Worker\CacheStorage"
+            )
+            robocopy $edgeDataPath "$stagingPath\Edge" /E /PURGE /XD $excludeDirs /R:1 /W:1 | Out-Null
+            
+            # SAFER BACKUP: Export the Current User's registry hive instead of copying NTUSER.DAT
+            # We need to run this within the user's context for HKCU to be correct.
+            # A workaround is to load the user's hive temporarily.
+            reg load HKLM\user_temp "$userProfilePath\NTUSER.DAT"
+            reg export HKLM\user_temp "$stagingPath\user_settings.reg" /y
+            reg unload HKLM\user_temp
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Save complete."
           }
-
-          # 2) Ensure Edge is NOT running before copying
-          Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-          # 3) Mirror Edge profile incrementally using robocopy (fast)
-          $edgeSrc = "$profile\AppData\Local\Microsoft\Edge\User Data"
-          $edgeDst = Join-Path $staging "Edge"
-          if (Test-Path $edgeSrc) {
-            if (-not (Test-Path $edgeDst)) { New-Item -ItemType Directory -Path $edgeDst -Force | Out-Null }
-            robocopy $edgeSrc $edgeDst /MIR /COPY:DAT /R:2 /W:2 /NFL /NDL
-            Write-Host "Edge profile mirrored to staging."
-          } else {
-            Write-Host "Edge source not found: $edgeSrc"
-          }
-
-          # 4) Mirror Desktop
-          $desktopSrc = "$profile\Desktop"
-          $desktopDst = Join-Path $staging "Desktop"
-          if (Test-Path $desktopSrc) {
-            robocopy $desktopSrc $desktopDst /MIR /COPY:DAT /R:2 /W:2 /NFL /NDL
-            Write-Host "Desktop mirrored to staging."
-          } else {
-            Write-Host "Desktop path missing: $desktopSrc"
-          }
-
-          # 5) Validate staging: compute a simple checksum manifest (file counts + size)
-          $edgeBytes = 0
-          if (Test-Path $edgeDst) {
-            $edgeBytes = (Get-ChildItem -Path $edgeDst -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-          }
-          $desktopCount = 0
-          if (Test-Path $desktopDst) {
-            $desktopCount = (Get-ChildItem -Path $desktopDst -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
-          }
-          $manifest = @{ edgeBytes=$edgeBytes; desktopFiles=$desktopCount; timestamp=(Get-Date).ToString("o") }
-          $manifest | ConvertTo-Json | Out-File -FilePath (Join-Path $staging "manifest.json") -Encoding UTF8
-
-          Write-Host "Staging validated: edgeBytes=$edgeBytes  desktopFiles=$desktopCount"
-
-      - name: "[SAVE 7] Save staged settings to Cache (versioned)"
+          
+      - name: Save Staged Settings to Cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.STAGING }}
-          key: ${{ env.CACHE_KEY_PREFIX }}-v1
-
-      - name: "[SAVE ARTIFACT 8] Upload backup artifact (run-scoped for safety)"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: edge-theme-desktop-backup
-          path: ${{ env.STAGING }}
-          retention-days: 7
-
-      - name: "[FINAL 9] Display status"
-        shell: powershell
-        run: |
-          Write-Host "Cache hit: ${{ steps.cache-restore.outputs.cache-hit }}"
-          Write-Host "Should restore: ${{ steps.should-restore.outputs.should_restore }}"
-          Write-Host "Restore reasons: ${{ steps.should-restore.outputs.restore_reasons }}"
+          path: D:\a\staging
+          key: ${{ env.CACHE_KEY }}
