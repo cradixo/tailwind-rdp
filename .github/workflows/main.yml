@@ -44,10 +44,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: D:\a\cache-staging
-          key: rdp-user-settings-v7 # Using a new key version for a clean test
+          key: rdp-user-settings-v8
 
       - name: "[SETUP 3/6] Configure Windows RDP"
-        run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force; netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Enable RDP logging for debugging
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "EnableLogging" -Value 1
 
       - name: "[SETUP 4/6] Create RDP User and Apply Settings"
         env:
@@ -57,27 +61,56 @@ jobs:
           $password = "Carding.Git!2024"
           $userProfile = "C:\Users\$username"
           
+          # Delete user if exists to ensure clean state
+          $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          if ($userExists) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] User already exists. Removing..."
+            Remove-LocalUser -Name $username
+            Start-Sleep -Seconds 2
+          }
+          
+          # Create user with password that never expires
           New-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force) -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           
+          # Wait for profile creation
+          $retries = 0
+          $maxRetries = 60
+          while (-not (Test-Path "$userProfile\NTUSER.DAT") -and $retries -lt $maxRetries) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Waiting for user profile to initialize... ($retries/$maxRetries)"
+            Start-Sleep -Seconds 2
+            $retries++
+          }
+          
           if ($env:CACHE_HIT -eq 'true') {
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Applying restored settings..."
-            # The Desktop folder is one of the last items to be created during profile initialization.
-            # Waiting for it ensures the profile is ready to be modified.
-            $retries = 0
-            while (-not (Test-Path "$userProfile\Desktop") -and $retries -lt 30) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Waiting for user profile to initialize..."
-              Start-Sleep -Seconds 1; $retries++
+            
+            # Load user registry hive for offline editing
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Loading user registry hive..."
+            reg load "HKU\TempUser" "$userProfile\NTUSER.DAT"
+            
+            # Check if we have a backed up registry file
+            if (Test-Path "D:\a\cache-staging\user-registry.reg") {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Importing registry settings..."
+              # Import registry settings to the loaded hive
+              reg import "D:\a\cache-staging\user-registry.reg"
             }
-            if (Test-Path "$userProfile\Desktop") {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Profile is active. Copying restored files..."
-              Copy-Item -Path "D:\a\cache-staging\*" -Destination $userProfile -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied successfully."
-            } else {
-              Write-Warning "[$(Get-Date -Format 'HH:mm:ss')] User profile did not initialize in time. Skipping cache application."
+            
+            # Unload the registry hive
+            reg unload "HKU\TempUser"
+            
+            # Copy files from cache
+            if (Test-Path "D:\a\cache-staging\Files") {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Copying files..."
+              robocopy "D:\a\cache-staging\Files" "$userProfile" /E /Z /R:2 /W:5 /MT:16
             }
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied successfully."
+          } else {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache miss. Starting with fresh settings."
           }
+          
           echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
@@ -103,12 +136,56 @@ jobs:
           
           $userProfilePath = "C:\Users\cardersparadox"
           $stagingPath = "D:\a\cache-staging"
+          
+          # Create staging directory structure
+          New-Item -Path "$stagingPath\Files" -ItemType Directory -Force | Out-Null
+          
+          # Function to backup user settings
+          function Backup-UserSettings {
+            param($UserProfile, $StagingPath)
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Starting backup process..."
+            
+            # Load user registry hive for offline backup
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Loading registry hive for backup..."
+            reg load "HKU\TempUser" "$UserProfile\NTUSER.DAT"
+            
+            # Export registry settings
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Exporting registry settings..."
+            reg export "HKU\TempUser" "$StagingPath\user-registry.reg" /y
+            
+            # Unload the registry hive
+            reg unload "HKU\TempUser"
+            
+            # Backup critical folders (using robocopy for resilience)
+            $foldersToBackup = @(
+              "AppData\Local\Microsoft\Edge",
+              "AppData\Local\Microsoft\Windows",
+              "AppData\Roaming\Microsoft\Windows",
+              "AppData\Local\Packages\Microsoft.Windows.ShellExperienceHost_cw5n1h2txyewy",
+              "AppData\Local\Microsoft\WindowsShell"
+            )
+            
+            foreach ($folder in $foldersToBackup) {
+              $source = "$UserProfile\$folder"
+              $dest = "$StagingPath\Files\$folder"
+              
+              if (Test-Path $source) {
+                New-Item -Path $dest -ItemType Directory -Force | Out-Null
+                robocopy $source $dest /E /Z /R:2 /W:5 /MT:16 /XD "Cache" "Temp" /XF "*.tmp" "*.temp" | Out-Null
+              }
+            }
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Backup completed successfully."
+          }
+          
+          # Initial backup
+          Backup-UserSettings -UserProfile $userProfilePath -StagingPath $stagingPath
+          
+          # Continuous backup loop
           while ($true) {
-            Start-Sleep -Seconds 300
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings to staging area..."
-            New-Item -Path "$stagingPath\AppData\Local\Microsoft" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-            Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "$userProfilePath\NTUSER.DAT" -Destination "$stagingPath\" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 10
+            Backup-UserSettings -UserProfile $userProfilePath -StagingPath $stagingPath
           }
           
       - name: Save Staged Settings to Cache
@@ -116,4 +193,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: D:\a\cache-staging
-          key: rdp-user-settings-v7
+          key: rdp-user-settings-v8
