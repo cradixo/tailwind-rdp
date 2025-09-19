@@ -1,5 +1,9 @@
 name: RDP-Static-Persistent-Final
 
+# Set the timezone for all logs and commands to India Standard Time
+env:
+  TZ: 'Asia/Kolkata'
+
 on:
   workflow_dispatch:
 
@@ -9,22 +13,49 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Create Staging Directory
-        run: New-Item -Path "D:\a\cache-staging" -ItemType Directory -Force
+      - name: "[SETUP 1/6] Forcefully Cleanup Stale Tailscale Device via API"
+        env:
+          TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+          HOSTNAME: "cardersparadox"
+        run: |
+          $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
+          
+          # First, get the tailnet name associated with the API key
+          try {
+            $tailnetJson = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet" -Headers $headers
+            $tailnet = $tailnetJson.tailnet
+          } catch {
+            Write-Error "Failed to retrieve tailnet name. Your TAILSCALE_API_KEY might be invalid or lack permissions."
+            exit 1
+          }
 
-      - name: Restore Settings to Staging Area
+          # Now, get all devices for that tailnet
+          $devices = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices" -Headers $headers
+          $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
+          
+          if ($device) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Found old device '$($device.hostname)' (ID: $($device.id)). Deleting it now."
+            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Device deleted successfully."
+          } else {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No previous device named '$($env:HOSTNAME)' found. No cleanup needed."
+          }
+
+      - name: "[SETUP 2/6] Create Staging Directory and Restore Cache"
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: D:\a\cache-staging
-          key: rdp-user-settings-v2
+          key: rdp-user-settings-v3
 
-      - name: Configure Core RDP Settings
+      - name: "[SETUP 3/6] Configure Windows RDP"
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: Create RDP User and Apply Settings
+      - name: "[SETUP 4/6] Create RDP User and Apply Restored Settings"
+        env:
+          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
         run: |
           $username = "cardersparadox"
           $password = "Carding.Git!2024"
@@ -33,51 +64,51 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           
-          # This step now runs AFTER the user is created, ensuring the destination directory exists.
           if ($env:CACHE_HIT -eq 'true') {
-            Write-Host "Applying restored settings from cache..."
-            # Create the destination AppData folder structure before copying
-            New-Item -Path "C:\Users\$username\AppData\Local\Microsoft" -ItemType Directory -Force
-            # Copy restored files to the new user's profile
-            Copy-Item -Path "D:\a\cache-staging\Edge" -Destination "C:\Users\$username\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "D:\a\cache-staging\NTUSER.DAT" -Destination "C:\Users\$username\" -Force -ErrorAction SilentlyContinue
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Applying restored settings..."
+            Start-Sleep -s 5 # Give the OS a moment to finish setting up the base profile
+            $userProfile = "C:\Users\$username"
+            New-Item -Path "$userProfile\AppData\Local\Microsoft" -ItemType Directory -Force
+            Copy-Item -Path "D:\a\cache-staging\Edge" -Destination "$userProfile\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "D:\a\cache-staging\NTUSER.DAT" -Destination "$userProfile\" -Force -ErrorAction SilentlyContinue
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied."
           }
           
           echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-        env:
-          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
 
-      - name: Install and Connect Tailscale
+      - name: "[SETUP 5/6] Install and Connect Tailscale"
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox" --force-reauth
           
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5; $retries++
+            $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 5; $retries++
           }
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
-      - name: Maintain Session and Auto-Save Settings
+      - name: "[ACTIVE 6/6] Maintain Session and Auto-Save Settings"
         shell: powershell
         run: |
-          Write-Host "================ RDP ACCESS ================"
-          Write-Host "Address: cardersparadox"
+          Write-Host "================ RDP ACCESS (IST Time) ================"
+          Write-Host "Address:  cardersparadox"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "============================================"
+          Write-Host "======================================================"
           
           $userProfilePath = "C:\Users\cardersparadox"
           $stagingPath = "D:\a\cache-staging"
           while ($true) {
-            Write-Host "[$(Get-Date)] Auto-saving settings to staging area..."
+            Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings to staging area..."
+            # Ensure staging directories exist before copying
+            New-Item -Path "$stagingPath\Edge" -ItemType Directory -Force
             Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\Edge" -Recurse -Force -ErrorAction SilentlyContinue
             Copy-Item -Path "$userProfilePath\NTUSER.DAT" -Destination "$stagingPath\" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 300
           }
           
       - name: Save Staged Settings to Cache
@@ -85,4 +116,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: D:\a\cache-staging
-          key: ${{ steps.cache-restore.outputs.cache-primary-key || 'rdp-user-settings-v2' }}
+          key: ${{ steps.cache-restore.outputs.cache-primary-key || 'rdp-user-settings-v3' }}
