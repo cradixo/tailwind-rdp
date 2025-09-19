@@ -1,6 +1,5 @@
 name: RDP-Static-Persistent-Final
 
-# Set the timezone for all logs and commands to India Standard Time
 env:
   TZ: 'Asia/Kolkata'
 
@@ -16,29 +15,28 @@ jobs:
       - name: "[SETUP 1/6] Forcefully Cleanup Stale Tailscale Device via API"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
+          $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           
-          # First, get the tailnet name associated with the API key
           try {
-            $tailnetJson = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet" -Headers $headers
-            $tailnet = $tailnetJson.tailnet
+            $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers
           } catch {
-            Write-Error "Failed to retrieve tailnet name. Your TAILSCALE_API_KEY might be invalid or lack permissions."
+            Write-Error "Failed to retrieve devices. Check that your TAILSCALE_API_KEY has 'Read' permissions and your TAILSCALE_TAILNET secret ('$($env:TS_TAILNET)') is correct."
             exit 1
           }
 
-          # Now, get all devices for that tailnet
-          $devices = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices" -Headers $headers
           $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
           
           if ($device) {
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Found old device '$($device.hostname)' (ID: $($device.id)). Deleting it now."
-            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
+            $deleteUri = "https://api.tailscale.com/api/v2/device/$($device.id)"
+            Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $headers
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Device deleted successfully."
           } else {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No previous device named '$($env:HOSTNAME)' found. No cleanup needed."
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] No previous device named '$($env:HOSTNAME)' found."
           }
 
       - name: "[SETUP 2/6] Create Staging Directory and Restore Cache"
@@ -46,7 +44,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: D:\a\cache-staging
-          key: rdp-user-settings-v3
+          key: rdp-user-settings-v4
 
       - name: "[SETUP 3/6] Configure Windows RDP"
         run: |
@@ -65,15 +63,20 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           
           if ($env:CACHE_HIT -eq 'true') {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Applying restored settings..."
-            Start-Sleep -s 5 # Give the OS a moment to finish setting up the base profile
             $userProfile = "C:\Users\$username"
-            New-Item -Path "$userProfile\AppData\Local\Microsoft" -ItemType Directory -Force
-            Copy-Item -Path "D:\a\cache-staging\Edge" -Destination "$userProfile\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "D:\a\cache-staging\NTUSER.DAT" -Destination "$userProfile\" -Force -ErrorAction SilentlyContinue
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied."
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Waiting for user profile to be created..."
+            $retries = 0
+            while (-not (Test-Path $userProfile) -and $retries -lt 30) {
+              Start-Sleep -Seconds 1
+              $retries++
+            }
+            if (Test-Path $userProfile) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Profile found. Applying restored settings..."
+              Copy-Item -Path "D:\a\cache-staging\*" -Destination $userProfile -Recurse -Force -ErrorAction SilentlyContinue
+            } else {
+              Write-Warning "[$(Get-Date -Format 'HH:mm:ss')] User profile was not created in time. Skipping cache application."
+            }
           }
-          
           echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
@@ -81,7 +84,7 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox" --force-reauth
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
@@ -105,9 +108,8 @@ jobs:
           while ($true) {
             Start-Sleep -Seconds 300
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings to staging area..."
-            # Ensure staging directories exist before copying
-            New-Item -Path "$stagingPath\Edge" -ItemType Directory -Force
-            Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\Edge" -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -Path "$stagingPath\AppData\Local\Microsoft" -ItemType Directory -Force
+            Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
             Copy-Item -Path "$userProfilePath\NTUSER.DAT" -Destination "$stagingPath\" -Force -ErrorAction SilentlyContinue
           }
           
@@ -116,4 +118,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: D:\a\cache-staging
-          key: ${{ steps.cache-restore.outputs.cache-primary-key || 'rdp-user-settings-v3' }}
+          key: rdp-user-settings-v4
