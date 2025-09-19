@@ -9,28 +9,6 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Cleanup Stale Tailscale Device
-        env:
-          TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
-          HOSTNAME: "cardersparadox"
-        run: |
-          $tailnet = ($env:TS_API_KEY).Split('-')[1]
-          $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
-          $devices = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices" -Headers $headers
-          
-          # Find devices with the target hostname that were last seen more than 5 minutes ago
-          $staleDevice = $devices.devices | Where-Object { 
-            $_.hostname -eq $env:HOSTNAME -and 
-            ([datetime]::Parse($_.lastSeen).ToUniversalTime() -lt (Get-Date).ToUniversalTime().AddMinutes(-5)) 
-          }
-          
-          if ($staleDevice) {
-            Write-Host "Found stale device $($staleDevice.hostname) (ID: $($staleDevice.deviceID)), last seen at $($staleDevice.lastSeen). Deleting."
-            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($staleDevice.deviceID)" -Method Delete -Headers $headers
-          } else {
-            Write-Host "No stale device named '$($env:HOSTNAME)' found. No cleanup needed."
-          }
-
       - name: Create Staging Directory
         run: New-Item -Path "D:\a\cache-staging" -ItemType Directory -Force
 
@@ -55,21 +33,26 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           
-          # If cache was restored, apply the settings
-          if (Test-Path "D:\a\cache-staging\NTUSER.DAT") {
+          # This step now runs AFTER the user is created, ensuring the destination directory exists.
+          if ($env:CACHE_HIT -eq 'true') {
             Write-Host "Applying restored settings from cache..."
+            # Create the destination AppData folder structure before copying
+            New-Item -Path "C:\Users\$username\AppData\Local\Microsoft" -ItemType Directory -Force
+            # Copy restored files to the new user's profile
             Copy-Item -Path "D:\a\cache-staging\Edge" -Destination "C:\Users\$username\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
             Copy-Item -Path "D:\a\cache-staging\NTUSER.DAT" -Destination "C:\Users\$username\" -Force -ErrorAction SilentlyContinue
           }
           
           echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+        env:
+          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
 
       - name: Install and Connect Tailscale
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox" --force-reauth
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
@@ -83,14 +66,13 @@ jobs:
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
-          Write-Host "Address: cardersparadox  (or $env:TAILSCALE_IP)"
+          Write-Host "Address: cardersparadox"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "============================================"
           
           $userProfilePath = "C:\Users\cardersparadox"
           $stagingPath = "D:\a\cache-staging"
-
           while ($true) {
             Write-Host "[$(Get-Date)] Auto-saving settings to staging area..."
             Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\Edge" -Recurse -Force -ErrorAction SilentlyContinue
