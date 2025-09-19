@@ -15,7 +15,7 @@ jobs:
       - name: "[SETUP 1/6] Forcefully Cleanup Stale Tailscale Device via API"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
-          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }} # Reads the now-correct tailnet name
+          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
@@ -24,7 +24,7 @@ jobs:
           try {
             $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers
           } catch {
-            Write-Error "API call failed. Please double-check your TAILSCALE_API_KEY and TAILSCALE_TAILNET secrets."
+            Write-Error "API call failed. Please verify your TAILSCALE_TAILNET secret ('$($env:TS_TAILNET)') and ensure your API Key has Read/Write permissions for Devices."
             exit 1
           }
 
@@ -44,7 +44,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: D:\a\cache-staging
-          key: rdp-user-settings-v6 # New cache key for a fresh start
+          key: rdp-user-settings-v7 # Using a new key version for a clean test
 
       - name: "[SETUP 3/6] Configure Windows RDP"
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force; netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
@@ -62,15 +62,18 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           
           if ($env:CACHE_HIT -eq 'true') {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Waiting for user profile to be fully initialized..."
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cache hit. Applying restored settings..."
+            # The Desktop folder is one of the last items to be created during profile initialization.
+            # Waiting for it ensures the profile is ready to be modified.
             $retries = 0
-            # We wait for the 'Desktop' folder, as it's one of the last things the OS creates.
             while (-not (Test-Path "$userProfile\Desktop") -and $retries -lt 30) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Waiting for user profile to initialize..."
               Start-Sleep -Seconds 1; $retries++
             }
             if (Test-Path "$userProfile\Desktop") {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Profile is active. Applying restored settings..."
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Profile is active. Copying restored files..."
               Copy-Item -Path "D:\a\cache-staging\*" -Destination $userProfile -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settings applied successfully."
             } else {
               Write-Warning "[$(Get-Date -Format 'HH:mm:ss')] User profile did not initialize in time. Skipping cache application."
             }
@@ -102,8 +105,8 @@ jobs:
           $stagingPath = "D:\a\cache-staging"
           while ($true) {
             Start-Sleep -Seconds 300
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings..."
-            New-Item -Path "$stagingPath\AppData\Local\Microsoft" -ItemType Directory -Force | Out-Null
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Auto-saving settings to staging area..."
+            New-Item -Path "$stagingPath\AppData\Local\Microsoft" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
             Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
             Copy-Item -Path "$userProfilePath\NTUSER.DAT" -Destination "$stagingPath\" -Force -ErrorAction SilentlyContinue
           }
@@ -113,4 +116,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: D:\a\cache-staging
-          key: rdp-user-settings-v6
+          key: rdp-user-settings-v7
