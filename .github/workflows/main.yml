@@ -1,30 +1,33 @@
-name: RDP-Persistent-Session-Advanced
+name: RDP-Persistent-Session-Advanced-V2
 
-# This allows the workflow to be triggered manually from the Actions tab
 on:
   workflow_dispatch:
 
-# Grant the workflow permission to write back to the repository for settings backup
 permissions:
   contents: write
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360 # Standard 6-hour maximum for GitHub Actions jobs
+    timeout-minutes: 360
 
     steps:
-      - name: "[SETUP 1/8] Checkout Repository"
-        # We need the code checked out to read/write the settings files
+      - name: "[SETUP 1/9] Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "[SETUP 2/8] Forcefully Cleanup Stale Tailscale Device via API"
+      - name: "[SETUP 2/9] Install Dependencies (7-Zip)"
+        run: |
+          # We use Chocolatey, the package manager for Windows, to install 7-Zip for handling backups.
+          choco install 7zip
+          # Add 7-Zip to the PATH for the rest of the job
+          echo "C:\Program Files\7-Zip" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: "[SETUP 3/9] Forcefully Cleanup Stale Tailscale Device"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
-          # This script ensures that any old machine with the same name is removed from your tailnet, allowing the name to be reused.
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -34,148 +37,155 @@ jobs:
             Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
 
-      - name: "[SETUP 3/8] Configure Core RDP Settings"
+      - name: "[SETUP 4/9] Configure Core RDP Settings"
         run: |
-          # Enable RDP and set security layers for broader compatibility.
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          # Add a firewall rule to allow RDP connections.
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: "[SETUP 4/8] Create RDP User"
+      - name: "[SETUP 5/9] Create RDP User"
         env:
           RDP_USER: "cardersparadox"
           RDP_PASS: "Carding.Git!2024"
         run: |
-          # Creates the local user and adds them to the appropriate groups.
           $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
-
-          if (-not (Get-LocalUser -Name "$env:RDP_USER")) {
-              Write-Error "CRITICAL: User creation failed."
-              exit 1
-          }
           Write-Host "SUCCESS: User '$($env:RDP_USER)' created."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 5/8] Restore User Settings"
-        # This step runs before the user logs in to apply previously saved settings.
+      - name: "[SETUP 6/9] Deploy Restore Script for Next Login"
+        env:
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+        shell: powershell
         run: |
-          $SettingsPath = "${{ github.workspace }}\rdp-settings"
-          if (Test-Path -Path $SettingsPath) {
-              Write-Host "Found settings directory. Attempting to restore..."
-              $RegFiles = Get-ChildItem -Path $SettingsPath -Filter *.reg
-              if ($RegFiles) {
-                  foreach ($file in $RegFiles) {
-                      Write-Host "Importing settings from $($file.Name)..."
-                      reg import "$($file.FullName)"
-                  }
-                  Write-Host "SUCCESS: User settings restored."
-              } else {
-                  Write-Host "No .reg files found in settings directory. Skipping restore."
-              }
-          } else {
-              Write-Host "No settings directory found. A new one will be created on first backup."
+          $SettingsRepoPath = "${{ github.workspace }}\rdp-settings"
+          $EdgeBackupFile = Join-Path $SettingsRepoPath "edge-backup.7z"
+          $UserStartupPath = "C:\Users\$($env:RDP_USER)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+
+          # Create the Startup directory if it doesn't exist
+          if (-not (Test-Path $UserStartupPath)) {
+              New-Item -Path $UserStartupPath -ItemType Directory -Force
           }
 
-      - name: "[SETUP 6/8] Install and Connect Tailscale"
+          # Create the restore script content
+          $RestoreScriptContent = @"
+          # This script runs automatically when you log in to RDP.
+          # It restores your Windows and Edge settings.
+          Write-Host 'Running first-time setup: Restoring settings...'
+
+          # Restore Registry Settings
+          $RegFiles = Get-ChildItem -Path "$SettingsRepoPath" -Filter *.reg
+          if (`$RegFiles) {
+              foreach (`$file in `$RegFiles) {
+                  Write-Host "Importing registry settings from `$(`$file.Name)..."
+                  reg import "`$(`$file.FullName)"
+              }
+          }
+
+          # Restore Microsoft Edge Data
+          if (Test-Path "$EdgeBackupFile") {
+              Write-Host 'Restoring Microsoft Edge data...'
+              `$EdgeLocalPath = "C:\Users\$($env:RDP_USER)\AppData\Local\Microsoft\Edge"
+              # Use 7z to extract the backup. The -p switch specifies the password.
+              7z x "$EdgeBackupFile" -o"`$EdgeLocalPath" -p"$($env:BACKUP_PASSWORD)" -y
+          }
+
+          Write-Host 'Restore complete. This script will now delete itself.'
+          Remove-Item -Path `$MyInvocation.MyCommand.Path -Force
+          "@
+
+          # Only create the restore script if there are actual settings to restore
+          if (Test-Path $SettingsRepoPath) {
+              Write-Host "Settings backup found. Deploying restore script to user's startup folder."
+              Set-Content -Path (Join-Path $UserStartupPath "restore.ps1") -Value $RestoreScriptContent
+          } else {
+              Write-Host "No previous settings backup found. Skipping restore script deployment."
+          }
+
+      - name: "[SETUP 7/9] Install and Connect Tailscale"
         run: |
-          # Install the latest version of Tailscale silently.
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          
-          # Connect to Tailscale using your auth key and the desired static hostname.
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           
-          # Robustly wait for the Tailscale IP to be assigned.
-          $tsIP = $null
-          $retries = 0
-          Write-Host "Waiting for Tailscale IP address..."
+          # Wait for Tailscale IP
+          $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
               if (-not $tsIP) { Start-Sleep -Seconds 5 }
               $retries++
           }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned after 60 seconds. Exiting."
-              exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 7/8] Verify RDP Accessibility"
+      - name: "[SETUP 8/9] Verify RDP Accessibility"
         run: |
-          Write-Host "Tailscale IP assigned: $env:TAILSCALE_IP"
-          Write-Host "Verifying RDP port 3389 is accessible..."
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "CRITICAL: TCP connection to RDP port 3389 over Tailscale IP failed."
-              exit 1
-          }
-          Write-Host "SUCCESS: RDP port is open and accessible over Tailscale."
+          if (-not $testResult.TcpTestSucceeded) { Write-Error "RDP port test failed."; exit 1 }
+          Write-Host "SUCCESS: RDP port is accessible."
 
-      - name: "[ACTIVE 8/8] Maintain Session & Backup Settings"
+      - name: "[ACTIVE 9/9] Maintain Session & Backup Settings Periodically"
+        env:
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
         shell: powershell
         run: |
-          # Display the final connection details.
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "======================================================"
-          
-          # This loop keeps the runner alive and performs periodic backups.
+          Write-Host "============================================"
+          Write-Host "NOTE: On first login, a script will run to restore your settings. Please wait for it to finish."
+
           while ($true) {
               $HeartbeatTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup check in 5 minutes."
+              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup in 5 minutes."
               Start-Sleep -Seconds 300
               
               $BackupTime = (Get-Date).ToString("HH:mm:ss")
               Write-Host "[$BackupTime] Running periodic settings backup..."
               
-              # Define where to store settings and which registry keys to back up
+              # Paths
               $SettingsPath = "${{ github.workspace }}\rdp-settings"
-              $UserRegistryPath = "HKEY_USERS\S-1-5-21-*" # Path will be resolved dynamically
-              $UserProfile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object { $_.LocalPath.split('\')[-1] -eq "$env:RDP_USER" }
-              if ($UserProfile) {
-                  $UserRegistryPath = "HKEY_USERS\$($UserProfile.SID)"
-              } else {
-                  Write-Warning "Could not find SID for user $env:RDP_USER. Backup may fail."
-                  # Fallback for older systems, less reliable
-                  $UserRegistryPath = "HKEY_CURRENT_USER"
-              }
+              $EdgeUserDataPath = "C:\Users\$($env:RDP_USER)\AppData\Local\Microsoft\Edge\User Data"
+              $EdgeBackupFile = Join-Path $SettingsPath "edge-backup.7z"
+              $UserProfile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object { $_.SID -and $_.LocalPath.EndsWith($env:RDP_USER) }
+              if (-not $UserProfile) { Write-Warning "Could not find user profile. Backup may fail."; continue }
+              $UserRegistryPath = "HKEY_USERS\$($UserProfile.SID)"
 
               $KeysToBackup = @{
                 "Themes" = "$UserRegistryPath\Software\Microsoft\Windows\CurrentVersion\Themes"
                 "Desktop" = "$UserRegistryPath\Control Panel\Desktop"
-                "Colors" = "$UserRegistryPath\Control Panel\Colors"
                 "Explorer" = "$UserRegistryPath\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
               }
-              
-              # Create directory if it doesn't exist
               if (-not (Test-Path $SettingsPath)) { New-Item -Path $SettingsPath -ItemType Directory }
               
-              # Export registry keys
+              # 1. Backup Registry Keys
               foreach ($name in $KeysToBackup.Keys) {
                   reg export "$($KeysToBackup[$name])" "$SettingsPath\$name.reg" /y
               }
+
+              # 2. Backup Edge Data
+              if (Test-Path $EdgeUserDataPath) {
+                  Write-Host "Backing up Microsoft Edge data..."
+                  # Use 7z to create an encrypted archive. -p specifies password.
+                  7z a "$EdgeBackupFile" "$EdgeUserDataPath" -p"$($env:BACKUP_PASSWORD)" -y
+              }
               
-              # Configure Git
+              # 3. Commit and Push to Git Repo
               git config --global user.name "GitHub Actions Backup Bot"
               git config --global user.email "actions-bot@github.com"
+              git add "$SettingsPath\*"
               
-              # Commit and push changes if any exist
-              git add $SettingsPath\*.reg
-              $Changes = git status --porcelain
-              if ($Changes) {
-                  Write-Host "Changes detected in user settings. Committing to repository..."
+              if (git status --porcelain) {
+                  Write-Host "Changes detected. Committing to repository..."
                   git commit -m "feat: Auto-backup user settings at $(Get-Date)"
                   git push
                   Write-Host "SUCCESS: Settings backed up."
               } else {
-                  Write-Host "No changes in user settings detected. Skipping commit."
+                  Write-Host "No changes detected. Skipping commit."
               }
           }
