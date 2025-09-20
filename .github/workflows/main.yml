@@ -1,4 +1,4 @@
-name: RDP-Static-Ephemeral
+name: RDP-Static-Final-Fresh-Session
 
 env:
   TZ: 'Asia/Kolkata'
@@ -18,6 +18,7 @@ jobs:
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
+          # This script ensures that any old machine with the same name is removed from your tailnet.
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -30,55 +31,32 @@ jobs:
       - name: "[SETUP 2/5] Configure Windows RDP"
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force; netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: "[SETUP 3/5] Create RDP User"
+      - name: "[SETUP 3/5] Create User and Profile"
         env:
           RDP_USER: "cardersparadox"
           RDP_PASS: "Carding.Git!2024"
         run: |
-          # Create the user account
+          # This script creates the user and a fresh profile for the RDP session.
           $userProfile = "C:\Users\$($env:RDP_USER)"
           New-LocalUser -Name $env:RDP_USER -Password (ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force) -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
-          
-          # Force the user profile to be created
           Write-Host "Forcing user profile creation..."
           $pinfo = New-Object System.Diagnostics.ProcessStartInfo
           $pinfo.FileName = "runas.exe"
           $pinfo.RedirectStandardInput = $true
           $pinfo.UseShellExecute = $false
-          # Use a command that runs briefly, rather than exiting instantly
-          $pinfo.Arguments = "/user:$($env:RDP_USER) whoami"
+          $pinfo.Arguments = "/user:$($env:RDP_USER) cmd.exe /c exit"
           $p = New-Object System.Diagnostics.Process
           $p.StartInfo = $pinfo
           $p.Start() | Out-Null
           $p.StandardInput.WriteLine($env:RDP_PASS)
           $p.WaitForExit()
-
-          # Wait and check for the profile directory to exist with retries
-          $profileDesktopPath = "$userProfile\Desktop"
-          $maxRetries = 5
-          $retryDelay = 3 # seconds
-          for ($i = 1; $i -le $maxRetries; $i++) {
-              Write-Host "Checking for profile... Attempt $i"
-              if (Test-Path $profileDesktopPath) {
-                  Write-Host "Profile found."
-                  break
-              }
-              if ($i -lt $maxRetries) {
-                  Write-Host "Profile not found yet. Waiting for $retryDelay seconds..."
-                  Start-Sleep -Seconds $retryDelay
-              }
-          }
-
-          if (-not (Test-Path $profileDesktopPath)) {
-              Write-Error "CRITICAL: Failed to create user profile after $maxRetries attempts."
-              Write-Host "Listing C:\Users directory for debugging..."
-              Get-ChildItem -Path C:\Users -Force | Select-Object FullName, LastWriteTime
+          if (-not (Test-Path "$userProfile\Desktop")) {
+              Write-Error "CRITICAL: Failed to create user profile."
               exit 1
           }
-
-          Write-Host "SUCCESS: User profile created."
+          Write-Host "SUCCESS: User profile created. Starting with a fresh session."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
@@ -92,14 +70,15 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
-      - name: "[ACTIVE 5/5] Maintain Session"
+      - name: "[ACTIVE 5/5] Maintain RDP Session"
         shell: powershell
         run: |
+          # This script prints the connection details and keeps the workflow running.
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "======================================================"
-          Write-Host "SUCCESS: Setup complete. The session will be kept alive."
+          Write-Host "Session is active. This workflow will remain running to allow RDP connection."
+          Write-Host "NOTE: No user data will be saved after the workflow finishes."
           while ($true) { Start-Sleep -Seconds 300; Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session active." }
-
