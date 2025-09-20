@@ -142,8 +142,8 @@ jobs:
 
           while ($true) {
               $HeartbeatTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup in 5 minutes."
-              Start-Sleep -Seconds 300
+              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup in 10 seconds."
+              Start-Sleep -Seconds 10
               
               $BackupTime = (Get-Date).ToString("HH:mm:ss")
               Write-Host "[$BackupTime] Running periodic settings backup..."
