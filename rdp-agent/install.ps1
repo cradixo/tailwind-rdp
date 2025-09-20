@@ -1,5 +1,5 @@
 #
-# install.ps1 - The Persistence Agent Installer
+# install.ps1 - The Persistence Agent Installer (V2 - schtasks fix)
 # This script is run by the GitHub Actions workflow to set up the environment.
 #
 param (
@@ -73,13 +73,9 @@ Set-Content -Path (Join-Path $ScriptsPath "backup.ps1") -Value $BackupScriptCont
 Write-Host "Backup script created at $($ScriptsPath)\backup.ps1"
 
 
-# --- 5. Create the Scheduled Task to run the backup script ---
-$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-ExecutionPolicy Bypass -File `"$($ScriptsPath)\backup.ps1`""
-$Trigger = New-ScheduledTaskTrigger -AtLogOn
-$Repetition = New-ScheduledTaskRepetition -Duration (New-TimeSpan -Days 9999) -Interval (New-TimeSpan -Minutes 1)
-$Trigger.Repetition = $Repetition
-$Principal = New-ScheduledTaskPrincipal -UserId $RdpUser -LogonType Interactive
-Register-ScheduledTask -TaskName "RDP_User_Backup" -Action $Action -Trigger $Trigger -Principal $Principal -Force
+# --- 5. Create the Scheduled Task using the universally compatible schtasks.exe ---
+$TaskCommand = "powershell.exe -ExecutionPolicy Bypass -File `"$($ScriptsPath)\backup.ps1`""
+schtasks /create /tn "RDP_User_Backup" /tr $TaskCommand /sc minute /mo 1 /ru $RdpUser /rp $RdpPass /f
 Write-Host "Scheduled task 'RDP_User_Backup' created to run every 1 minute."
 
 Write-Host "--- Persistence Agent Installation Complete ---"
