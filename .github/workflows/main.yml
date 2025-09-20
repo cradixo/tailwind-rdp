@@ -1,4 +1,4 @@
-name: RDP-Persistent-Session-Agent-V2
+name: RDP-Persistent-Session-Tool-Based
 
 on:
   workflow_dispatch:
@@ -12,36 +12,26 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: "[SETUP 1/7] Checkout Repository Content"
+      - name: "[SETUP 1/7] Checkout Repository"
         uses: actions/checkout@v4
         with:
-          # A Personal Access Token is required to allow the in-guest agent to push backups.
+          # A Personal Access Token is required to allow the tool to push backups.
           token: ${{ secrets.GIT_PAT }}
 
-      - name: "[SETUP 2/7] Install Dependencies (rclone)"
+      - name: "[SETUP 2/7] Download and Extract Backup Utility (Fab's AutoBackup)"
         run: |
-          Invoke-WebRequest -Uri "https://downloads.rclone.org/v1.64.0/rclone-v1.64.0-windows-amd64.zip" -OutFile "rclone.zip"
-          Expand-Archive -Path "rclone.zip" -DestinationPath "rclone"
-          $RclonePath = (Get-ChildItem -Path ".\rclone\*\rclone.exe").FullName
-          Copy-Item -Path $RclonePath -Destination "C:\Windows\System32"
-          rclone version
+          # Download the portable, command-line compatible version of the tool
+          Invoke-WebRequest -Uri "https://www.fab-sw.com/archives/FabAutoBackup_7.8.0.21_Portable_64.zip" -OutFile "fabs.zip"
+          Expand-Archive -Path "fabs.zip" -DestinationPath "C:\fabs"
+          # Verify the tool is ready
+          if (Test-Path "C:\fabs\AutoBackup64.exe") {
+            Write-Host "Fab's AutoBackup utility is ready."
+          } else {
+            Write-Error "Failed to extract Fab's AutoBackup."
+            exit 1
+          }
 
-      - name: "[SETUP 3/7] Cleanup Stale Tailscale Device"
-        env:
-          TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
-          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
-          HOSTNAME: "cardersparadox"
-        run: |
-          $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
-          $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
-          try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
-          $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
-          if ($device) {
-            Write-Host "Found and deleting old device '$($device.hostname)'."
-            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
-          } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
-
-      - name: "[SETUP 4/7] Configure RDP & Create User"
+      - name: "[SETUP 3/7] Configure RDP & Create User"
         env:
           RDP_USER: "cardersparadox"
           RDP_PASS: "Carding.Git!2024"
@@ -55,34 +45,47 @@ jobs:
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 5/7] Deploy and Run In-Guest Persistence Agent"
-        # FIX: Explicitly set the working directory to the root of the repository.
-        # This ensures that the relative path to the script is always correct.
-        working-directory: ${{ github.workspace }}
-        env:
-          GIT_PAT: ${{ secrets.GIT_PAT }}
+      - name: "[SETUP 4/7] Restore Previous Session Using Fab's"
         shell: powershell
         run: |
-          # FIX: Execute using a reliable relative path from the working directory.
-          & .\rdp-agent\install.ps1 -RdpUser "$env:RDP_USER" -RdpPass "$env:RDP_PASS" -GitPat "$env:GIT_PAT" -RepoPath "${{ github.workspace }}"
+          $BackupPath = "${{ github.workspace }}\rdp-backups\backup.fab"
+          if (Test-Path $BackupPath) {
+              Write-Host "Backup found. Restoring user session with Fab's AutoBackup..."
+              # Command-line arguments to restore the user profile silently
+              # /AUTORUN tells it to run without GUI
+              # /RESTORE tells it to perform a restore
+              # /FILE points to our backup file
+              # /LOG creates a detailed log for debugging
+              Start-Process -FilePath "C:\fabs\AutoBackup64.exe" -ArgumentList "/AUTORUN /RESTORE /FILE=`"$BackupPath`" /LOG=`"${{ github.workspace }}\restore_log.txt`"" -Wait
+              Write-Host "Restore process completed. Check restore_log.txt for details."
+          } else {
+              Write-Host "No previous backup found. A new one will be created during the session."
+          }
+
+      - name: "[SETUP 5/7] Cleanup Stale Tailscale Device"
+        env:
+          TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
+          HOSTNAME: "cardersparadox"
+        run: |
+          # This script is unchanged and ensures a clean Tailscale connection
+          $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
+          $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
+          try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { continue }
+          $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
+          if ($device) {
+            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
+          }
 
       - name: "[SETUP 6/7] Install and Connect Tailscale"
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
-          
-          # Wait for Tailscale IP
-          $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-              if (-not $tsIP) { Start-Sleep -Seconds 5 }
-              $retries++
-          }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
+          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[ACTIVE 7/7] Maintain Session"
+      - name: "[ACTIVE 7/7] Maintain Session & Backup with Fab's"
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
@@ -90,12 +93,40 @@ jobs:
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "============================================"
-          Write-Host "AGENT STATUS: Persistence agent is active."
-          Write-Host "On first login, a script will restore your previous settings."
-          Write-Host "A background task is now backing up your session every 1 minute."
+          Write-Host "AGENT STATUS: Fab's AutoBackup is managing session state."
 
-          # This loop's only job is to keep the runner alive.
+          $BackupPath = "${{ github.workspace }}\rdp-backups\backup.fab"
+
+          # Configure Git within the runner for pushing backups
+          git config --global user.name "GitHub Actions Backup Bot"
+          git config --global user.email "actions-bot@github.com"
+
+          # This loop keeps the runner alive and triggers the backup tool
           while ($true) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session active. The in-guest agent is handling all backups."
-              Start-Sleep -Seconds 300
+              $HeartbeatTime = (Get-Date).ToString("HH:mm:ss")
+              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup in 1 minute."
+              Start-Sleep -Seconds 60
+
+              $BackupTime = (Get-Date).ToString("HH:mm:ss")
+              Write-Host "[$BackupTime] Running periodic backup with Fab's AutoBackup..."
+
+              # This single command tells the tool to back up the specified user's data
+              # /BACKUP tells it to perform a backup
+              # /USER specifies which user to back up
+              # /FILE specifies the output file
+              # /DEFSELECTIONS selects all common data (Desktop, Edge, Themes, etc.)
+              Start-Process -FilePath "C:\fabs\AutoBackup64.exe" -ArgumentList "/AUTORUN /BACKUP /USER=`"$env:RDP_USER`" /FILE=`"$BackupPath`" /DEFSELECTIONS /LOG=`"${{ github.workspace }}\backup_log.txt`"" -Wait
+
+              # Commit and push the backup file if it has changed
+              git add "$BackupPath"
+              # Also commit the logs for debugging
+              git add backup_log.txt
+              if (git status --porcelain) {
+                  Write-Host "Changes detected. Committing backup to repository..."
+                  git commit -m "sync: RDP session backup @ $BackupTime"
+                  git push
+                  Write-Host "SUCCESS: Backup pushed to repository."
+              } else {
+                  Write-Host "No changes detected since last backup."
+              }
           }
