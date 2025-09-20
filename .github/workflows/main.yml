@@ -1,9 +1,7 @@
-name: RDP-Static-Persistent-Final-Chain-Cache
+name: RDP-Static-Ephemeral
 
 env:
   TZ: 'Asia/Kolkata'
-  # Use a stable prefix for all our caches. Change this only when you want to start fresh.
-  CACHE_KEY_PREFIX: rdp-user-settings-v1
 
 on:
   workflow_dispatch:
@@ -14,13 +12,12 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: "[SETUP 1/7] Forcefully Cleanup Stale Tailscale Device via API"
+      - name: "[SETUP 1/5] Forcefully Cleanup Stale Tailscale Device via API"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
-          # Same script as before
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -30,29 +27,16 @@ jobs:
             Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
 
-      - name: "[SETUP 2/7] Restore Latest Cache"
-        id: cache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: D:\a\staging
-          # The key we will save with. It's unique to this specific workflow run.
-          key: ${{ env.CACHE_KEY_PREFIX }}-${{ github.run_id }}
-          # IMPORTANT: Look for the most recent cache that starts with our prefix.
-          restore-keys: |
-            ${{ env.CACHE_KEY_PREFIX }}-
-
-      - name: "[SETUP 3/7] Configure Windows RDP"
+      - name: "[SETUP 2/5] Configure Windows RDP"
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force; netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: "[SETUP 4/7] Create User, Pre-populate Profile, and Apply Settings"
+      - name: "[SETUP 3/5] Create RDP User"
         env:
-          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
           RDP_USER: "cardersparadox"
           RDP_PASS: "Carding.Git!2024"
         run: |
-          # This script remains identical, as it correctly populates the profile and applies settings.
+          # Create the user and force profile creation for a clean session.
           $userProfile = "C:\Users\$($env:RDP_USER)"
-          $stagingPath = "D:\a\staging"
           New-LocalUser -Name $env:RDP_USER -Password (ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force) -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
@@ -72,20 +56,10 @@ jobs:
               exit 1
           }
           Write-Host "SUCCESS: User profile created."
-          if ($env:CACHE_HIT -eq 'true' -and (Test-Path "$stagingPath\user_settings.reg")) {
-            Write-Host "Cache hit. Applying restored settings..."
-            Copy-Item -Path "$stagingPath\Desktop\*" -Destination "$userProfile\Desktop" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "$stagingPath\Edge" -Destination "$userProfile\AppData\Local\Microsoft" -Recurse -Force -ErrorAction SilentlyContinue
-            reg import "$stagingPath\user_settings.reg"
-            Write-Host "Settings applied."
-          } else {
-            Write-Host "No cache found. Starting with a fresh profile."
-          }
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      # Step 5 (Install Tailscale) remains the same
-      - name: "[SETUP 5/7] Install and Connect Tailscale"
+      - name: "[SETUP 4/5] Install and Connect Tailscale"
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
@@ -95,33 +69,13 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
-      # Step 6 (Scheduled Task Backup) remains the same
-      - name: "[ACTIVE 6/7] Setup Background Backup and Maintain Session"
+      - name: "[ACTIVE 5/5] Maintain Session"
         shell: powershell
         run: |
-          # This script is identical, setting up the robust background backup.
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "======================================================"
-          $stagingPath = "D:\a\staging"; $userProfilePath = "C:\Users\$($env:RDP_USER)"; $backupScriptPath = "D:\a\backup.ps1"
-          $scriptContent = @"
-          reg export HKCU `"$stagingPath\user_settings.reg`" /y
-          robocopy `"$userProfilePath\Desktop`" `"$stagingPath\Desktop`" /E /PURGE /R:1 /W:1
-          robocopy `"$userProfilePath\AppData\Local\Microsoft\Edge`" `"$stagingPath\Edge`" /E /PURGE /XD `"$userProfilePath\AppData\Local\Microsoft\Edge\User Data\Default\Cache`" /R:1 /W:1
-          "@
-          $scriptContent | Out-File -FilePath $backupScriptPath -Encoding utf8
-          $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$backupScriptPath`""
-          $taskTrigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 2) -Once -At (Get-Date)
-          Register-ScheduledTask -TaskName "UserSyncBackup" -Action $taskAction -Trigger $taskTrigger -User $env:RDP_USER -Password $env:RDP_PASS -RunLevel Highest -Force
-          Write-Host "SUCCESS: Scheduled backup task created."
+          Write-Host "SUCCESS: Setup complete. The session will be kept alive."
           while ($true) { Start-Sleep -Seconds 300; Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session active." }
-          
-      - name: "[SAVE 7/7] Save Settings to a New Cache"
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: D:\a\staging
-          # Save with the unique key for this run.
-          key: ${{ env.CACHE_KEY_PREFIX }}-${{ github.run_id }}
