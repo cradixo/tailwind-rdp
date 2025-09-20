@@ -1,4 +1,4 @@
-name: RDP-Persistent-Session-Rclone
+name: RDP-Persistent-Session-Agent
 
 on:
   workflow_dispatch:
@@ -12,24 +12,27 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: "[SETUP 1/8] Checkout Repository"
+      - name: "[SETUP 1/7] Checkout Repository Content"
         uses: actions/checkout@v4
+        with:
+          # We need a Personal Access Token to allow the agent to push changes
+          token: ${{ secrets.GIT_PAT }}
 
-      - name: "[SETUP 2/8] Install Dependencies (rclone)"
+      - name: "[SETUP 2/7] Install Dependencies (rclone)"
         run: |
-          # Download and install rclone, a powerful file syncing tool
           Invoke-WebRequest -Uri "https://downloads.rclone.org/v1.64.0/rclone-v1.64.0-windows-amd64.zip" -OutFile "rclone.zip"
           Expand-Archive -Path "rclone.zip" -DestinationPath "rclone"
           $RclonePath = (Get-ChildItem -Path ".\rclone\*\rclone.exe").FullName
           Copy-Item -Path $RclonePath -Destination "C:\Windows\System32"
-          rclone version # Verify installation
+          rclone version
 
-      - name: "[SETUP 3/8] Forcefully Cleanup Stale Tailscale Device"
+      - name: "[SETUP 3/7] Cleanup Stale Tailscale Device"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
+          # This script ensures that any old machine with the same name is removed.
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -39,10 +42,10 @@ jobs:
             Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
 
-      - name: "[SETUP 4/8] Configure Core RDP Settings & User"
+      - name: "[SETUP 4/7] Configure RDP & Create User"
         env:
-          RDP_USER: ${{ secrets.RDP_USERNAME }}
-          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          RDP_USER: "cardersparadox"
+          RDP_PASS: "Carding.Git!2024"
         run: |
           # Configure RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -52,78 +55,24 @@ jobs:
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
-          Write-Host "SUCCESS: User '$($env:RDP_USER)' created."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 5/8] Deploy Startup & Backup Scripts"
-        shell: powershell
+      - name: "[SETUP 5/7] Deploy and Run In-Guest Persistence Agent"
         env:
-          RDP_USER_ENV: ${{ env.RDP_USER }}
-          RDP_PASS_ENV: ${{ env.RDP_PASS }}
+          GIT_PAT: ${{ secrets.GIT_PAT }}
+        shell: powershell
         run: |
-          $RepoPath = "${{ github.workspace }}"
-          $BackupStoragePath = Join-Path $RepoPath "rdp-backups"
-          $UserHome = "C:\Users\$($env:RDP_USER_ENV)"
-          $UserStartupPath = Join-Path $UserHome "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          # This is the key step. We execute the installer script from the repository.
+          & "${{ github.workspace }}\rdp-agent\install.ps1" -RdpUser "$env:RDP_USER" -RdpPass "$env:RDP_PASS" -GitPat "$env:GIT_PAT" -RepoPath "${{ github.workspace }}"
 
-          # --- Create Restore Script (runs once on login) ---
-          $RestoreScriptContent = @"
-          Write-Host '--- Restoring User Settings ---'
-          # Use rclone to copy backed up Edge data to the correct location
-          rclone copy --create-empty-src-dirs "$BackupStoragePath\Edge" "`$env:LOCALAPPDATA\Microsoft\Edge"
-          
-          # Import registry settings
-          Get-ChildItem -Path "$BackupStoragePath\Registry" -Filter *.reg | ForEach-Object { reg import `$_.FullName }
-          
-          Write-Host '--- Restore Complete. This script will now be removed. ---'
-          Remove-Item -Path `$MyInvocation.MyCommand.Path -Force
-          "@
-
-          # --- Create Backup Script (runs every 1 min via Task Scheduler) ---
-          $BackupScriptContent = @"
-          # Set paths within the script's context
-          `$RepoPath = "${{ github.workspace }}"
-          `$BackupStoragePath = Join-Path `$RepoPath "rdp-backups"
-
-          # 1. Backup Registry
-          New-Item -Path "`$BackupStoragePath\Registry" -ItemType Directory -Force | Out-Null
-          reg export HKCU\Software\Microsoft\Windows\CurrentVersion\Themes "`$BackupStoragePath\Registry\Themes.reg" /y
-          reg export "HKCU\Control Panel\Desktop" "`$BackupStoragePath\Registry\Desktop.reg" /y
-          
-          # 2. Backup Edge Data using rclone
-          # 'sync' is efficient and only copies changed files
-          rclone sync --create-empty-src-dirs "`$env:LOCALAPPDATA\Microsoft\Edge\User Data" "`$BackupStoragePath\Edge\User Data"
-
-          # 3. Commit and Push changes to GitHub
-          Set-Location -Path `$RepoPath
-          git config --global user.name "GitHub Actions Backup Bot"
-          git config --global user.email "actions-bot@github.com"
-          git add "`$BackupStoragePath\*"
-          
-          if (git status --porcelain) {
-              git commit -m "feat: Auto-backup user settings at `$(Get-Date)"
-              git push
-          }
-          "@
-
-          # Deploy scripts to a neutral location
-          $ScriptsPath = "C:\Users\Public\Documents"
-          Set-Content -Path (Join-Path $ScriptsPath "backup.ps1") -Value $BackupScriptContent
-          if (Test-Path $BackupStoragePath) {
-              New-Item -Path $UserStartupPath -ItemType Directory -Force
-              Set-Content -Path (Join-Path $UserStartupPath "restore.ps1") -Value $RestoreScriptContent
-          }
-
-          # Create the Scheduled Task to run the backup script as the RDP user
-          schtasks /create /tn "RDP_User_Backup" /tr "powershell.exe -ExecutionPolicy Bypass -File $ScriptsPath\backup.ps1" /sc minute /mo 1 /ru "$env:RDP_USER_ENV" /rp "$env:RDP_PASS_ENV" /f
-
-      - name: "[SETUP 6/8] Install and Connect Tailscale"
+      - name: "[SETUP 6/7] Install and Connect Tailscale"
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           
+          # Wait for Tailscale IP
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
@@ -133,14 +82,7 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 7/8] Verify RDP Accessibility"
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "RDP port test failed."; exit 1 }
-          Write-Host "SUCCESS: RDP port is accessible."
-
-      - name: "[ACTIVE 8/8] Maintain Session"
+      - name: "[ACTIVE 7/7] Maintain Session"
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
@@ -148,13 +90,12 @@ jobs:
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "============================================"
-          Write-Host "INFO: A background task will back up your settings every 1 minute."
-          Write-Host "INFO: On first login, a script will restore your previous settings."
+          Write-Host "AGENT STATUS: Persistence agent is active."
+          Write-Host "On first login, a script will restore your previous settings."
+          Write-Host "A background task is now backing up your session every 1 minute."
 
-          # This loop now only needs to keep the runner alive.
-          # All backup logic is handled by the background Windows Task Scheduler.
+          # This loop's only job is to keep the runner alive.
           while ($true) {
-              $HeartbeatTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Cancel the workflow to terminate."
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session active. The in-guest agent is handling all backups."
               Start-Sleep -Seconds 300
           }
