@@ -35,11 +35,13 @@ jobs:
           RDP_USER: "cardersparadox"
           RDP_PASS: "Carding.Git!2024"
         run: |
-          # Create the user and force profile creation for a clean session.
+          # Create the user account
           $userProfile = "C:\Users\$($env:RDP_USER)"
           New-LocalUser -Name $env:RDP_USER -Password (ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force) -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
+          
+          # Force the user profile to be created
           Write-Host "Forcing user profile creation..."
           $pinfo = New-Object System.Diagnostics.ProcessStartInfo
           $pinfo.FileName = "runas.exe"
@@ -51,10 +53,30 @@ jobs:
           $p.Start() | Out-Null
           $p.StandardInput.WriteLine($env:RDP_PASS)
           $p.WaitForExit()
-          if (-not (Test-Path "$userProfile\Desktop")) {
-              Write-Error "CRITICAL: Failed to create user profile."
+
+          # Wait and check for the profile directory to exist with retries
+          $profileDesktopPath = "$userProfile\Desktop"
+          $maxRetries = 5
+          $retryDelay = 3 # seconds
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              Write-Host "Checking for profile... Attempt $i"
+              if (Test-Path $profileDesktopPath) {
+                  Write-Host "Profile found."
+                  break
+              }
+              if ($i -lt $maxRetries) {
+                  Write-Host "Profile not found yet. Waiting for $retryDelay seconds..."
+                  Start-Sleep -Seconds $retryDelay
+              }
+          }
+
+          if (-not (Test-Path $profileDesktopPath)) {
+              Write-Error "CRITICAL: Failed to create user profile after $maxRetries attempts."
+              Write-Host "Listing C:\Users directory for debugging..."
+              Get-ChildItem -Path C:\Users -Force | Select-Object FullName, LastWriteTime
               exit 1
           }
+
           Write-Host "SUCCESS: User profile created."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
