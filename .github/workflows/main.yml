@@ -1,4 +1,4 @@
-name: RDP-Persistent-Session-Agent
+name: RDP-Persistent-Session-Agent-V2
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: "[SETUP 1/7] Checkout Repository Content"
         uses: actions/checkout@v4
         with:
-          # We need a Personal Access Token to allow the agent to push changes
+          # A Personal Access Token is required to allow the in-guest agent to push backups.
           token: ${{ secrets.GIT_PAT }}
 
       - name: "[SETUP 2/7] Install Dependencies (rclone)"
@@ -32,7 +32,6 @@ jobs:
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
-          # This script ensures that any old machine with the same name is removed.
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -47,10 +46,8 @@ jobs:
           RDP_USER: "cardersparadox"
           RDP_PASS: "Carding.Git!2024"
         run: |
-          # Configure RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          # Create User
           $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
@@ -59,12 +56,15 @@ jobs:
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
       - name: "[SETUP 5/7] Deploy and Run In-Guest Persistence Agent"
+        # FIX: Explicitly set the working directory to the root of the repository.
+        # This ensures that the relative path to the script is always correct.
+        working-directory: ${{ github.workspace }}
         env:
           GIT_PAT: ${{ secrets.GIT_PAT }}
         shell: powershell
         run: |
-          # This is the key step. We execute the installer script from the repository.
-          & "${{ github.workspace }}\rdp-agent\install.ps1" -RdpUser "$env:RDP_USER" -RdpPass "$env:RDP_PASS" -GitPat "$env:GIT_PAT" -RepoPath "${{ github.workspace }}"
+          # FIX: Execute using a reliable relative path from the working directory.
+          & .\rdp-agent\install.ps1 -RdpUser "$env:RDP_USER" -RdpPass "$env:RDP_PASS" -GitPat "$env:GIT_PAT" -RepoPath "${{ github.workspace }}"
 
       - name: "[SETUP 6/7] Install and Connect Tailscale"
         run: |
