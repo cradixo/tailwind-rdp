@@ -47,7 +47,8 @@ jobs:
           $pinfo.FileName = "runas.exe"
           $pinfo.RedirectStandardInput = $true
           $pinfo.UseShellExecute = $false
-          $pinfo.Arguments = "/user:$($env:RDP_USER) cmd.exe /c exit"
+          # Use a command that runs briefly, rather than exiting instantly
+          $pinfo.Arguments = "/user:$($env:RDP_USER) whoami"
           $p = New-Object System.Diagnostics.Process
           $p.StartInfo = $pinfo
           $p.Start() | Out-Null
@@ -101,3 +102,4 @@ jobs:
           Write-Host "======================================================"
           Write-Host "SUCCESS: Setup complete. The session will be kept alive."
           while ($true) { Start-Sleep -Seconds 300; Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session active." }
+
