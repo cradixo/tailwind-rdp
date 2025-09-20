@@ -1,4 +1,4 @@
-name: RDP-Persistent-Session-Advanced-V2
+name: RDP-Persistent-Session-Rclone
 
 on:
   workflow_dispatch:
@@ -12,17 +12,19 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: "[SETUP 1/9] Checkout Repository"
+      - name: "[SETUP 1/8] Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "[SETUP 2/9] Install Dependencies (7-Zip)"
+      - name: "[SETUP 2/8] Install Dependencies (rclone)"
         run: |
-          # We use Chocolatey, the package manager for Windows, to install 7-Zip for handling backups.
-          choco install 7zip
-          # Add 7-Zip to the PATH for the rest of the job
-          echo "C:\Program Files\7-Zip" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # Download and install rclone, a powerful file syncing tool
+          Invoke-WebRequest -Uri "https://downloads.rclone.org/v1.64.0/rclone-v1.64.0-windows-amd64.zip" -OutFile "rclone.zip"
+          Expand-Archive -Path "rclone.zip" -DestinationPath "rclone"
+          $RclonePath = (Get-ChildItem -Path ".\rclone\*\rclone.exe").FullName
+          Copy-Item -Path $RclonePath -Destination "C:\Windows\System32"
+          rclone version # Verify installation
 
-      - name: "[SETUP 3/9] Forcefully Cleanup Stale Tailscale Device"
+      - name: "[SETUP 3/8] Forcefully Cleanup Stale Tailscale Device"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
@@ -37,17 +39,15 @@ jobs:
             Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
 
-      - name: "[SETUP 4/9] Configure Core RDP Settings"
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-
-      - name: "[SETUP 5/9] Create RDP User"
+      - name: "[SETUP 4/8] Configure Core RDP Settings & User"
         env:
-          RDP_USER: "cardersparadox"
-          RDP_PASS: "Carding.Git!2024"
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
+          # Configure RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Create User
           $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
@@ -56,62 +56,74 @@ jobs:
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 6/9] Deploy Restore Script for Next Login"
-        env:
-          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+      - name: "[SETUP 5/8] Deploy Startup & Backup Scripts"
         shell: powershell
+        env:
+          RDP_USER_ENV: ${{ env.RDP_USER }}
+          RDP_PASS_ENV: ${{ env.RDP_PASS }}
         run: |
-          $SettingsRepoPath = "${{ github.workspace }}\rdp-settings"
-          $EdgeBackupFile = Join-Path $SettingsRepoPath "edge-backup.7z"
-          $UserStartupPath = "C:\Users\$($env:RDP_USER)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          $RepoPath = "${{ github.workspace }}"
+          $BackupStoragePath = Join-Path $RepoPath "rdp-backups"
+          $UserHome = "C:\Users\$($env:RDP_USER_ENV)"
+          $UserStartupPath = Join-Path $UserHome "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
 
-          # Create the Startup directory if it doesn't exist
-          if (-not (Test-Path $UserStartupPath)) {
-              New-Item -Path $UserStartupPath -ItemType Directory -Force
-          }
-
-          # Create the restore script content
+          # --- Create Restore Script (runs once on login) ---
           $RestoreScriptContent = @"
-          # This script runs automatically when you log in to RDP.
-          # It restores your Windows and Edge settings.
-          Write-Host 'Running first-time setup: Restoring settings...'
-
-          # Restore Registry Settings
-          $RegFiles = Get-ChildItem -Path "$SettingsRepoPath" -Filter *.reg
-          if (`$RegFiles) {
-              foreach (`$file in `$RegFiles) {
-                  Write-Host "Importing registry settings from `$(`$file.Name)..."
-                  reg import "`$(`$file.FullName)"
-              }
-          }
-
-          # Restore Microsoft Edge Data
-          if (Test-Path "$EdgeBackupFile") {
-              Write-Host 'Restoring Microsoft Edge data...'
-              `$EdgeLocalPath = "C:\Users\$($env:RDP_USER)\AppData\Local\Microsoft\Edge"
-              # Use 7z to extract the backup. The -p switch specifies the password.
-              7z x "$EdgeBackupFile" -o"`$EdgeLocalPath" -p"$($env:BACKUP_PASSWORD)" -y
-          }
-
-          Write-Host 'Restore complete. This script will now delete itself.'
+          Write-Host '--- Restoring User Settings ---'
+          # Use rclone to copy backed up Edge data to the correct location
+          rclone copy --create-empty-src-dirs "$BackupStoragePath\Edge" "`$env:LOCALAPPDATA\Microsoft\Edge"
+          
+          # Import registry settings
+          Get-ChildItem -Path "$BackupStoragePath\Registry" -Filter *.reg | ForEach-Object { reg import `$_.FullName }
+          
+          Write-Host '--- Restore Complete. This script will now be removed. ---'
           Remove-Item -Path `$MyInvocation.MyCommand.Path -Force
           "@
 
-          # Only create the restore script if there are actual settings to restore
-          if (Test-Path $SettingsRepoPath) {
-              Write-Host "Settings backup found. Deploying restore script to user's startup folder."
+          # --- Create Backup Script (runs every 1 min via Task Scheduler) ---
+          $BackupScriptContent = @"
+          # Set paths within the script's context
+          `$RepoPath = "${{ github.workspace }}"
+          `$BackupStoragePath = Join-Path `$RepoPath "rdp-backups"
+
+          # 1. Backup Registry
+          New-Item -Path "`$BackupStoragePath\Registry" -ItemType Directory -Force | Out-Null
+          reg export HKCU\Software\Microsoft\Windows\CurrentVersion\Themes "`$BackupStoragePath\Registry\Themes.reg" /y
+          reg export "HKCU\Control Panel\Desktop" "`$BackupStoragePath\Registry\Desktop.reg" /y
+          
+          # 2. Backup Edge Data using rclone
+          # 'sync' is efficient and only copies changed files
+          rclone sync --create-empty-src-dirs "`$env:LOCALAPPDATA\Microsoft\Edge\User Data" "`$BackupStoragePath\Edge\User Data"
+
+          # 3. Commit and Push changes to GitHub
+          Set-Location -Path `$RepoPath
+          git config --global user.name "GitHub Actions Backup Bot"
+          git config --global user.email "actions-bot@github.com"
+          git add "`$BackupStoragePath\*"
+          
+          if (git status --porcelain) {
+              git commit -m "feat: Auto-backup user settings at `$(Get-Date)"
+              git push
+          }
+          "@
+
+          # Deploy scripts to a neutral location
+          $ScriptsPath = "C:\Users\Public\Documents"
+          Set-Content -Path (Join-Path $ScriptsPath "backup.ps1") -Value $BackupScriptContent
+          if (Test-Path $BackupStoragePath) {
+              New-Item -Path $UserStartupPath -ItemType Directory -Force
               Set-Content -Path (Join-Path $UserStartupPath "restore.ps1") -Value $RestoreScriptContent
-          } else {
-              Write-Host "No previous settings backup found. Skipping restore script deployment."
           }
 
-      - name: "[SETUP 7/9] Install and Connect Tailscale"
+          # Create the Scheduled Task to run the backup script as the RDP user
+          schtasks /create /tn "RDP_User_Backup" /tr "powershell.exe -ExecutionPolicy Bypass -File $ScriptsPath\backup.ps1" /sc minute /mo 1 /ru "$env:RDP_USER_ENV" /rp "$env:RDP_PASS_ENV" /f
+
+      - name: "[SETUP 6/8] Install and Connect Tailscale"
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           
-          # Wait for Tailscale IP
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
@@ -121,16 +133,14 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 8/9] Verify RDP Accessibility"
+      - name: "[SETUP 7/8] Verify RDP Accessibility"
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) { Write-Error "RDP port test failed."; exit 1 }
           Write-Host "SUCCESS: RDP port is accessible."
 
-      - name: "[ACTIVE 9/9] Maintain Session & Backup Settings Periodically"
-        env:
-          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+      - name: "[ACTIVE 8/8] Maintain Session"
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
@@ -138,54 +148,13 @@ jobs:
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "============================================"
-          Write-Host "NOTE: On first login, a script will run to restore your settings. Please wait for it to finish."
+          Write-Host "INFO: A background task will back up your settings every 1 minute."
+          Write-Host "INFO: On first login, a script will restore your previous settings."
 
+          # This loop now only needs to keep the runner alive.
+          # All backup logic is handled by the background Windows Task Scheduler.
           while ($true) {
               $HeartbeatTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup in 10 seconds."
-              Start-Sleep -Seconds 10
-              
-              $BackupTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$BackupTime] Running periodic settings backup..."
-              
-              # Paths
-              $SettingsPath = "${{ github.workspace }}\rdp-settings"
-              $EdgeUserDataPath = "C:\Users\$($env:RDP_USER)\AppData\Local\Microsoft\Edge\User Data"
-              $EdgeBackupFile = Join-Path $SettingsPath "edge-backup.7z"
-              $UserProfile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object { $_.SID -and $_.LocalPath.EndsWith($env:RDP_USER) }
-              if (-not $UserProfile) { Write-Warning "Could not find user profile. Backup may fail."; continue }
-              $UserRegistryPath = "HKEY_USERS\$($UserProfile.SID)"
-
-              $KeysToBackup = @{
-                "Themes" = "$UserRegistryPath\Software\Microsoft\Windows\CurrentVersion\Themes"
-                "Desktop" = "$UserRegistryPath\Control Panel\Desktop"
-                "Explorer" = "$UserRegistryPath\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-              }
-              if (-not (Test-Path $SettingsPath)) { New-Item -Path $SettingsPath -ItemType Directory }
-              
-              # 1. Backup Registry Keys
-              foreach ($name in $KeysToBackup.Keys) {
-                  reg export "$($KeysToBackup[$name])" "$SettingsPath\$name.reg" /y
-              }
-
-              # 2. Backup Edge Data
-              if (Test-Path $EdgeUserDataPath) {
-                  Write-Host "Backing up Microsoft Edge data..."
-                  # Use 7z to create an encrypted archive. -p specifies password.
-                  7z a "$EdgeBackupFile" "$EdgeUserDataPath" -p"$($env:BACKUP_PASSWORD)" -y
-              }
-              
-              # 3. Commit and Push to Git Repo
-              git config --global user.name "GitHub Actions Backup Bot"
-              git config --global user.email "actions-bot@github.com"
-              git add "$SettingsPath\*"
-              
-              if (git status --porcelain) {
-                  Write-Host "Changes detected. Committing to repository..."
-                  git commit -m "feat: Auto-backup user settings at $(Get-Date)"
-                  git push
-                  Write-Host "SUCCESS: Settings backed up."
-              } else {
-                  Write-Host "No changes detected. Skipping commit."
-              }
+              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Cancel the workflow to terminate."
+              Start-Sleep -Seconds 300
           }
