@@ -1,17 +1,16 @@
 <#
 .SYNOPSIS
     Backs up Windows theme settings and Microsoft Edge user data to a Git repository.
-    This script should be run manually from within the RDP session.
+    This script is modified by the GitHub Actions workflow to include the necessary credentials.
 #>
 
 # --- Configuration ---
 $githubUsername = "cradixo"
 $repositoryName = "tailwind-rdp"
-# The GIT_PAT is read from the user's environment variables, set by the workflow.
-$pat = $env:GIT_PAT 
+# This placeholder will be replaced by the GitHub Actions workflow. Do not modify it.
+$pat = "GIT_PAT_PLACEHOLDER" 
 
 # --- Paths ---
-# Use the current user's profile for all paths
 $userProfile = $env:USERPROFILE
 $backupDir = Join-Path -Path $userProfile -ChildPath "Documents\RDP_Backup"
 $logFile = Join-Path -Path $backupDir -ChildPath "backup_log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').txt"
@@ -20,15 +19,14 @@ $regFileTheme = Join-Path -Path $backupDir -ChildPath "theme_settings.reg"
 $gitRepoPath = Join-Path -Path $backupDir -ChildPath "repo"
 
 # --- Script Body ---
-# Start logging all output to a file
 Start-Transcript -Path $logFile -Append
 
 Write-Host "----------------------------------------------------"
 Write-Host "Starting RDP Backup Process at $(Get-Date)"
 Write-Host "----------------------------------------------------"
 
-if ([string]::IsNullOrWhiteSpace($pat)) {
-    Write-Error "CRITICAL: GIT_PAT environment variable not found. Cannot push to GitHub."
+if ($pat -eq "GIT_PAT_PLACEHOLDER" -or [string]::IsNullOrWhiteSpace($pat)) {
+    Write-Error "CRITICAL: The GIT_PAT placeholder was not replaced. Cannot push to GitHub. This is an error in the workflow."
     Stop-Transcript
     exit 1
 }
@@ -51,16 +49,15 @@ $edgeProcesses = Get-Process msedge -ErrorAction SilentlyContinue
 if ($edgeProcesses) {
     $edgeProcesses | Stop-Process -Force
     Write-Host "  - SUCCESS: Microsoft Edge has been terminated."
+    Start-Sleep -Seconds 3 # A small delay to ensure file locks are released
 } else {
     Write-Host "  - INFO: Microsoft Edge was not running."
 }
-# A small delay to ensure file locks are released
-Start-Sleep -Seconds 3
 
 # 3. Backup Theme Registry Settings
 Write-Host "[STEP 3/6] Backing up theme settings from HKCU registry..."
 try {
-    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" $regFileTheme /y
+    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes" $regFileTheme /y
     Write-Host "  - SUCCESS: Exported theme settings to $regFileTheme"
 } catch {
     Write-Error "  - FAILED: Could not export registry settings. Error: $_"
@@ -74,7 +71,7 @@ try {
     Compress-Archive -Path "$edgeDataDir\*" -DestinationPath "$backupDir\edge_data.zip" -Force
     Write-Host "  - SUCCESS: Compressed Edge data to edge_data.zip"
 } catch {
-    Write-Error "  - FAILED: Could not compress Edge data. Error: $_"
+    Write-Error "  - FAILED: Could not compress Edge data. It might be in use. Error: $_"
     Stop-Transcript
     exit 1
 }
@@ -89,16 +86,25 @@ Write-Host "[STEP 6/6] Committing and pushing backup to GitHub..."
 Write-Host "  - Moving backup files into the repository..."
 Move-Item -Path $regFileTheme -Destination $gitRepoPath -Force
 Move-Item -Path "$backupDir\edge_data.zip" -Destination $gitRepoPath -Force
-Move-Item -Path $logFile -Destination $gitRepoPath -Force # Also commit the log file
 
-git config --global user.email "action@github.com"
-git config --global user.name "GitHub Action RDP Backup"
-git add .
-git commit -m "RDP Backup - $(Get-Date)"
-git push
-
-Write-Host "----------------------------------------------------"
-Write-Host "Backup and upload complete at $(Get-Date)"
-Write-Host "----------------------------------------------------"
-
+# --- KEY CHANGE IS HERE ---
+# Stop logging to release the lock on the log file BEFORE moving it.
+Write-Host "  - Finalizing log file..."
 Stop-Transcript
+
+# Now that the file is unlocked, move it into the repo.
+Move-Item -Path $logFile -Destination $gitRepoPath -Force
+# --- END OF KEY CHANGE ---
+
+git config --global user.email "rdp-backup@github.com"
+git config --global user.name "RDP Backup Action"
+git add .
+
+if (-not (git diff --staged --quiet)) {
+    git commit -m "RDP Backup - $(Get-Date)"
+    git push
+}
+
+Write-Host "----------------------------------------------------"
+Write-Host "Backup and upload process finished successfully at $(Get-Date)"
+Write-Host "----------------------------------------------------"
