@@ -1,0 +1,47 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20250921120653
+Username: runnervmbe3js\cardersparadox
+RunAs User: runnervmbe3js\cardersparadox
+Configuration Name: 
+Machine: runnervmbe3js (Microsoft Windows NT 10.0.26100.0)
+Host Application: powershell -ExecutionPolicy Bypass -File backup.ps1
+Process ID: 3828
+PSVersion: 5.1.26100.4768
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.4768
+BuildVersion: 10.0.26100.4768
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is C:\Users\cardersparadox.runnervmbe3js\Documents\RDP_Backup\backup_log_2025-09-21_12-06-53.txt
+----------------------------------------------------
+Starting RDP Backup Process at 09/21/2025 12:06:54
+----------------------------------------------------
+[STEP 1/6] Preparing backup directory...
+  - Removing old repository clone.
+  - SUCCESS: Backup directory is ready.
+[STEP 2/6] Closing Microsoft Edge...
+  - INFO: Microsoft Edge was not running.
+[STEP 3/6] Backing up theme settings from HKCU registry...
+The operation completed successfully.
+  - SUCCESS: Exported theme settings to C:\Users\cardersparadox.runnervmbe3js\Documents\RDP_Backup\theme_settings.reg
+[STEP 4/6] Backing up Microsoft Edge data...
+  - SUCCESS: Compressed Edge data to edge_data.zip
+[STEP 5/6] Cloning GitHub repository...
+Cloning into 'C:\Users\cardersparadox.runnervmbe3js\Documents\RDP_Backup\repo'...
+remote: Enumerating objects: 266, done.
+remote: Counting objects: 100% (266/266), done.
+remote: Compressing objects: 100% (139/139), done.
+remote: Total 266 (delta 70), reused 121 (delta 35), pack-reused 0 (from 0)
+Receiving objects: 100% (266/266), 11.33 MiB | 18.75 MiB/s, done.
+Resolving deltas: 100% (70/70), done.
+[STEP 6/6] Committing and pushing backup to GitHub...
+  - Moving backup files into the repository...
+  - Finalizing log file...
+**********************
+Windows PowerShell transcript end
+End time: 20250921120808
+**********************
