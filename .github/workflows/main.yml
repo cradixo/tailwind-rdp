@@ -9,14 +9,14 @@ jobs:
     timeout-minutes: 360
     
     permissions:
-      contents: read # Only needs read to checkout, token in script handles releases
+      contents: read
       
     steps:
       - name: "[SETUP 1/8] Checkout Repository for Scripts"
         uses: actions/checkout@v3
         with:
           repository: 'cradixo/tailwind-rdp'
-          token: ${{ secrets.GIT_PAT }} # Token for checkout only
+          token: ${{ secrets.GIT_PAT }}
           path: 'rdp-tools'
 
       # Steps 2-5 are your robust setup steps, unchanged.
@@ -26,13 +26,12 @@ jobs:
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
+          # (Your existing Tailscale cleanup script)
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
           $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
-          if ($device) {
-            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
-          }
+          if ($device) { Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers }
 
       - name: "[SETUP 3/8] Configure Core RDP Settings"
         run: |
@@ -66,61 +65,47 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 6/8] Download and Restore Profile Backup"
+      - name: "[SETUP 6/8] Prepare Restore Environment"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in token is fine for downloading releases
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RDP_USER: ${{ secrets.RDP_USERNAME }}
         shell: powershell
         continue-on-error: true
         run: |
           $releaseTag = "latest-rdp-profile"
-          $userProfilePath = "C:\Users\$env:RDP_USER"
-          $downloadDir = "$env:TEMP\RdpRestore"
-          New-Item -Path $downloadDir -ItemType Directory -Force
+          $restoreSourceDir = "C:\RDP_Restore_Source"
+          New-Item -Path $restoreSourceDir -ItemType Directory -Force
 
           Write-Host "Attempting to download backup from release '$releaseTag'..."
-          gh release download $releaseTag --repo "${{ github.repository }}" --dir $downloadDir --pattern "*.zip"
+          gh release download $releaseTag --repo "${{ github.repository }}" --dir $restoreSourceDir --pattern "*.zip"
           
-          $backupArchive = Get-ChildItem -Path $downloadDir -Filter "*.zip" | Select-Object -First 1
+          $backupArchive = Get-ChildItem -Path $restoreSourceDir -Filter "*.zip" | Select-Object -First 1
           if ($backupArchive) {
-              Write-Host "SUCCESS: Found backup archive: $($backupArchive.Name)"
-              $restorePath = "$downloadDir\extracted"
-              Expand-Archive -Path $backupArchive.FullName -DestinationPath $restorePath -Force
-              
-              # Restore Full User Registry
-              $regFile = Join-Path $restorePath "full_user_profile.reg"
-              if (Test-Path $regFile) {
-                  Write-Host "Restoring full user registry settings..."
-                  reg import $regFile
-              }
-
-              # Restore Edge Data
-              $edgeBackupPath = Join-Path $restorePath "Edge_User_Data"
-              $edgeTargetPath = "$userProfilePath\AppData\Local\Microsoft\Edge\User Data"
-              if (Test-Path $edgeBackupPath) {
-                  Write-Host "Restoring Microsoft Edge data..."
-                  Remove-Item -Path $edgeTargetPath -Recurse -Force -ErrorAction SilentlyContinue
-                  Copy-Item -Path $edgeBackupPath -Destination $edgeTargetPath -Recurse -Force
-                  Write-Host "Granting user ownership of restored Edge files..."
-                  # --- THIS IS THE CORRECTED ICACLS COMMAND ---
-                  icacls.exe $edgeTargetPath /grant "$($env:RDP_USER):(OI)(CI)F" /T
-              }
-              Write-Host "Profile restore complete."
+              Write-Host "SUCCESS: Found backup archive. Expanding..."
+              Expand-Archive -Path $backupArchive.FullName -DestinationPath $restoreSourceDir -Force
+              Remove-Item $backupArchive.FullName # Clean up the zip file
           } else {
               Write-Host "INFO: No backup release found. This is normal for a first run."
           }
 
-      - name: "[SETUP 7/8] Prepare User Environment"
+      - name: "[SETUP 7/8] Deploy Scripts for User"
         env:
           RDP_USER: ${{ secrets.RDP_USERNAME }}
         shell: powershell
         run: |
           $userProfile = "C:\Users\$env:RDP_USER"
           $desktopFolder = "$userProfile\Desktop"
-          $backupScriptPath = ".\rdp-tools\backup.ps1"
-          New-Item -Path $desktopFolder -ItemType Directory -Force | Out-Null
-          Copy-Item -Path $backupScriptPath -Destination $desktopFolder
-          Write-Host "SUCCESS: 'backup.ps1' script is placed on the user's desktop."
+          $startupFolder = "$userProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          
+          New-Item -Path $desktopFolder, $startupFolder -ItemType Directory -Force | Out-Null
+          
+          # Place the backup script on the Desktop
+          Copy-Item -Path ".\rdp-tools\backup.ps1" -Destination $desktopFolder
+          
+          # Place the new restore script in the Startup folder
+          Copy-Item -Path ".\rdp-tools\restore-profile.ps1" -Destination $startupFolder
+          
+          Write-Host "SUCCESS: Backup script placed on Desktop; Restore script placed in Startup."
 
       - name: "[ACTIVE 8/8] Maintain Session"
         shell: powershell
@@ -130,7 +115,9 @@ jobs:
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "======================================================"
-          Write-Host "NOTE: To save changes, edit and run the 'backup.ps1' script on the Desktop."
+          Write-Host "NOTE: On first login, your profile will be restored automatically."
+          Write-Host "      You will see the screen flicker as Explorer restarts. This is normal."
+          Write-Host "      To save new changes, run the 'backup.ps1' script on the Desktop."
           
           while ($true) {
               Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session is active."
