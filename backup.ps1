@@ -1,110 +1,99 @@
 <#
 .SYNOPSIS
-    Backs up Windows theme settings and Microsoft Edge user data to a Git repository.
-    This script is modified by the GitHub Actions workflow to include the necessary credentials.
+    Backs up the user's RDP profile (Theme and Edge data) to a GitHub Release.
+    This script is intended to be run manually from the RDP Desktop.
+.DESCRIPTION
+    The script gathers necessary files, creates a single versioned ZIP archive,
+    and uses the GitHub CLI (gh) to upload the archive as a release asset,
+    overwriting any previous backup.
 #>
 
 # --- Configuration ---
 $githubUsername = "cradixo"
 $repositoryName = "tailwind-rdp"
-# This placeholder will be replaced by the GitHub Actions workflow. Do not modify it.
-$pat = "GIT_PAT_PLACEHOLDER" 
+$releaseTag = "latest-rdp-profile" # The static tag for our profile release
 
-# --- Paths ---
-$userProfile = $env:USERPROFILE
-$backupDir = Join-Path -Path $userProfile -ChildPath "Documents\RDP_Backup"
-$logFile = Join-Path -Path $backupDir -ChildPath "backup_log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').txt"
-$edgeDataDir = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
-$regFileTheme = Join-Path -Path $backupDir -ChildPath "theme_settings.reg"
-$gitRepoPath = Join-Path -Path $backupDir -ChildPath "repo"
+# This placeholder is replaced by the GitHub Actions workflow with your secret PAT.
+$pat = "GIT_PAT_PLACEHOLDER"
+
+# --- Function for Detailed Logging ---
+function Log-Message {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$timestamp] [$Level] $Message"
+}
 
 # --- Script Body ---
-Start-Transcript -Path $logFile -Append
+# Create a temporary staging area for the backup files
+$stagingDir = New-Item -Path $env:TEMP -Name "RdpBackup_$(Get-Random)" -ItemType Directory
+Log-Message "Created temporary staging directory at $($stagingDir.FullName)"
 
-Write-Host "----------------------------------------------------"
-Write-Host "Starting RDP Backup Process at $(Get-Date)"
-Write-Host "----------------------------------------------------"
-
-if ($pat -eq "GIT_PAT_PLACEHOLDER" -or [string]::IsNullOrWhiteSpace($pat)) {
-    Write-Error "CRITICAL: The GIT_PAT placeholder was not replaced. Cannot push to GitHub. This is an error in the workflow."
-    Stop-Transcript
-    exit 1
-}
-
-# 1. Prepare Backup Directory
-Write-Host "[STEP 1/6] Preparing backup directory..."
-if (Test-Path $gitRepoPath) {
-    Write-Host "  - Removing old repository clone."
-    Remove-Item -Path $gitRepoPath -Recurse -Force
-}
-if (-not (Test-Path $backupDir)) {
-    Write-Host "  - Creating backup directory at $backupDir"
-    New-Item -Path $backupDir -ItemType Directory | Out-Null
-}
-Write-Host "  - SUCCESS: Backup directory is ready."
-
-# 2. Close Microsoft Edge to prevent data corruption
-Write-Host "[STEP 2/6] Closing Microsoft Edge..."
-$edgeProcesses = Get-Process msedge -ErrorAction SilentlyContinue
-if ($edgeProcesses) {
-    $edgeProcesses | Stop-Process -Force
-    Write-Host "  - SUCCESS: Microsoft Edge has been terminated."
-    Start-Sleep -Seconds 3 # A small delay to ensure file locks are released
-} else {
-    Write-Host "  - INFO: Microsoft Edge was not running."
-}
-
-# 3. Backup Theme Registry Settings
-Write-Host "[STEP 3/6] Backing up theme settings from HKCU registry..."
 try {
-    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes" $regFileTheme /y
-    Write-Host "  - SUCCESS: Exported theme settings to $regFileTheme"
+    # --- STEP 1: VERIFY REQUIREMENTS ---
+    Log-Message "Verifying requirements..."
+    if ($pat -eq "GIT_PAT_PLACEHOLDER" -or [string]::IsNullOrWhiteSpace($pat)) {
+        throw "CRITICAL: GIT_PAT placeholder was not replaced. This is a workflow error."
+    }
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw "CRITICAL: GitHub CLI ('gh') is not installed or not in PATH. This should be pre-installed on runners."
+    }
+    Log-Message "GitHub CLI and authentication token are present." -Level "SUCCESS"
+
+    # --- STEP 2: CLOSE MICROSOFT EDGE ---
+    Log-Message "Ensuring Microsoft Edge is closed to prevent data corruption..."
+    Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -Verbose
+    Start-Sleep -Seconds 3 # Allow time for file handles to be released
+
+    # --- STEP 3: GATHER THEME SETTINGS ---
+    Log-Message "Exporting theme settings from registry..."
+    $regFile = Join-Path -Path $stagingDir.FullName -ChildPath "theme_settings.reg"
+    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes" $regFile /y
+    if (Test-Path $regFile) {
+        Log-Message "Successfully exported theme settings." -Level "SUCCESS"
+    } else {
+        throw "Failed to export theme registry settings."
+    }
+
+    # --- STEP 4: GATHER MICROSOFT EDGE DATA ---
+    Log-Message "Locating Microsoft Edge user data..."
+    $edgeDataDir = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
+    $edgeStagingDir = Join-Path -Path $stagingDir.FullName -ChildPath "Edge_User_Data"
+    if (Test-Path $edgeDataDir) {
+        Copy-Item -Path $edgeDataDir -Destination $edgeStagingDir -Recurse -Force
+        Log-Message "Successfully copied Edge data to staging area." -Level "SUCCESS"
+    } else {
+        Log-Message "Edge user data directory not found, skipping." -Level "WARN"
+    }
+
+    # --- STEP 5: CREATE A SINGLE BACKUP ARCHIVE ---
+    $archiveName = "RDP_Profile_Backup_$(Get-Date -Format 'yyyy-MM-dd_HH-mm').zip"
+    $archivePath = Join-Path -Path $env:TEMP -ChildPath $archiveName
+    if (Test-Path $archivePath) { Remove-Item $archivePath }
+    Compress-Archive -Path "$($stagingDir.FullName)\*" -DestinationPath $archivePath
+    $fileSize = (Get-Item $archivePath).Length / 1MB
+    Log-Message "Created final backup archive at $archivePath (Size: $($fileSize.ToString('F2')) MB)" -Level "SUCCESS"
+
+    # --- STEP 6: UPLOAD TO GITHUB RELEASE ---
+    Log-Message "Uploading backup archive to GitHub Release '$releaseTag'..."
+    $env:GH_TOKEN = $pat
+    
+    # Create the release. If it exists, this command updates it.
+    gh release create $releaseTag --repo "$githubUsername/$repositoryName" --title "RDP Profile Backup" --notes "Latest automated RDP profile backup." --prerelease --target main
+
+    # Upload the asset. The --clobber flag overwrites the file if it already exists on the release.
+    gh release upload $releaseTag $archivePath --repo "$githubUsername/$repositoryName" --clobber
+    
+    Log-Message "Backup successfully uploaded to GitHub." -Level "SUCCESS"
+
 } catch {
-    Write-Error "  - FAILED: Could not export registry settings. Error: $_"
-    Stop-Transcript
-    exit 1
+    Log-Message "An error occurred during the backup process: $($_.Exception.Message)" -Level "ERROR"
+} finally {
+    # --- STEP 7: CLEANUP ---
+    Log-Message "Cleaning up temporary staging directory..."
+    Remove-Item -Path $stagingDir.FullName -Recurse -Force
+    if (Test-Path $archivePath) { Remove-Item $archivePath }
+    Log-Message "Cleanup complete."
 }
-
-# 4. Backup Microsoft Edge Data
-Write-Host "[STEP 4/6] Backing up Microsoft Edge data..."
-try {
-    Compress-Archive -Path "$edgeDataDir\*" -DestinationPath "$backupDir\edge_data.zip" -Force
-    Write-Host "  - SUCCESS: Compressed Edge data to edge_data.zip"
-} catch {
-    Write-Error "  - FAILED: Could not compress Edge data. It might be in use. Error: $_"
-    Stop-Transcript
-    exit 1
-}
-
-# 5. Clone repository to commit to
-Write-Host "[STEP 5/6] Cloning GitHub repository..."
-git clone "https://oauth2:$pat@github.com/$githubUsername/$repositoryName.git" $gitRepoPath
-cd $gitRepoPath
-
-# 6. Commit and Push to GitHub
-Write-Host "[STEP 6/6] Committing and pushing backup to GitHub..."
-Write-Host "  - Moving backup files into the repository..."
-Move-Item -Path $regFileTheme -Destination $gitRepoPath -Force
-Move-Item -Path "$backupDir\edge_data.zip" -Destination $gitRepoPath -Force
-
-# --- KEY CHANGE IS HERE ---
-# Stop logging to release the lock on the log file BEFORE moving it.
-Write-Host "  - Finalizing log file..."
-Stop-Transcript
-
-# Now that the file is unlocked, move it into the repo.
-Move-Item -Path $logFile -Destination $gitRepoPath -Force
-# --- END OF KEY CHANGE ---
-
-git config --global user.email "rdp-backup@github.com"
-git config --global user.name "RDP Backup Action"
-git add .
-
-if (-not (git diff --staged --quiet)) {
-    git commit -m "RDP Backup - $(Get-Date)"
-    git push
-}
-
-Write-Host "----------------------------------------------------"
-Write-Host "Backup and upload process finished successfully at $(Get-Date)"
-Write-Host "----------------------------------------------------"
