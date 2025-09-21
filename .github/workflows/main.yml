@@ -26,7 +26,7 @@ jobs:
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
-          # (Your existing Tailscale cleanup script - no changes needed)
+          # (Your existing Tailscale cleanup script)
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -38,7 +38,7 @@ jobs:
 
       - name: "[SETUP 3/9] Configure Core RDP Settings"
         run: |
-          # (Your existing RDP config script - no changes needed)
+          # (Your existing RDP config script)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
@@ -48,19 +48,18 @@ jobs:
           RDP_USER: ${{ secrets.RDP_USERNAME }}
           RDP_PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
-          # (Your existing user creation script - no changes needed)
+          # (Your existing user creation script)
           $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
           if (-not (Get-LocalUser -Name "$env:RDP_USER")) { Write-Error "CRITICAL: User creation failed."; exit 1 }
-          Write-Host "SUCCESS: User '$($env:RDP_USER)' created."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
       - name: "[SETUP 5/9] Install and Connect Tailscale"
         run: |
-          # (Your existing Tailscale script - no changes needed)
+          # (Your existing Tailscale script)
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
@@ -79,6 +78,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RDP_USER: ${{ secrets.RDP_USERNAME }}
         shell: powershell
+        continue-on-error: true # <-- THIS IS THE FIX
         run: |
           $releaseTag = "latest-rdp-profile"
           $userProfilePath = "C:\Users\$env:RDP_USER"
@@ -88,6 +88,7 @@ jobs:
           Write-Host "Attempting to download backup from release '$releaseTag'..."
           gh release download $releaseTag --repo "${{ github.repository }}" --dir $downloadDir --pattern "*.zip"
           
+          # This part of the script will now run even if the download command "fails"
           $backupArchive = Get-ChildItem -Path $downloadDir -Filter "*.zip" | Select-Object -First 1
           if ($backupArchive) {
               Write-Host "SUCCESS: Found backup archive: $($backupArchive.Name)"
@@ -137,7 +138,7 @@ jobs:
 
       - name: "[SETUP 8/9] Verify RDP Accessibility"
         run: |
-          # (Your existing RDP verification step - no changes needed)
+          # (Your existing RDP verification step)
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) { Write-Error "CRITICAL: RDP port 3389 is not accessible."; exit 1 }
           Write-Host "SUCCESS: RDP port is open and accessible over Tailscale."
@@ -145,7 +146,7 @@ jobs:
       - name: "[ACTIVE 9/9] Maintain Session"
         shell: powershell
         run: |
-          # (Your existing session maintenance step - no changes needed)
+          # (Your existing session maintenance step)
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
