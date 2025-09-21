@@ -7,21 +7,26 @@ jobs:
   secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
-
+    
+    permissions:
+      contents: write # Needed for gh to create/manage releases
+      
     steps:
-      - name: "[SETUP 1/8] Checkout Repository for Scripts"
+      - name: "[SETUP 1/9] Checkout Repository for Scripts"
         uses: actions/checkout@v3
         with:
           repository: 'cradixo/tailwind-rdp'
           token: ${{ secrets.GIT_PAT }}
           path: 'rdp-tools'
 
-      - name: "[SETUP 2/8] Forcefully Cleanup Stale Tailscale Device via API"
+      # Steps 2-5 are your robust setup steps, unchanged.
+      - name: "[SETUP 2/9] Forcefully Cleanup Stale Tailscale Device"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
+          # (Your existing Tailscale cleanup script - no changes needed)
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -31,17 +36,19 @@ jobs:
             Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
 
-      - name: "[SETUP 3/8] Configure Core RDP Settings"
+      - name: "[SETUP 3/9] Configure Core RDP Settings"
         run: |
+          # (Your existing RDP config script - no changes needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: "[SETUP 4/8] Create RDP User"
+      - name: "[SETUP 4/9] Create RDP User"
         env:
           RDP_USER: ${{ secrets.RDP_USERNAME }}
           RDP_PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
+          # (Your existing user creation script - no changes needed)
           $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
@@ -51,69 +58,103 @@ jobs:
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 5/8] Install and Connect Tailscale"
+      - name: "[SETUP 5/9] Install and Connect Tailscale"
         run: |
+          # (Your existing Tailscale script - no changes needed)
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           $tsIP = $null; $retries = 0
-          Write-Host "Waiting for Tailscale IP address..."
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
               if (-not $tsIP) { Start-Sleep -Seconds 5 }
               $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned after 60 seconds. Exiting."; exit 1 }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 6/8] Prepare User Environment for Backup/Restore"
+      # --- This is the new, self-contained Restore Step ---
+      - name: "[SETUP 6/9] Download and Restore Profile Backup"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+        shell: powershell
+        run: |
+          $releaseTag = "latest-rdp-profile"
+          $userProfilePath = "C:\Users\$env:RDP_USER"
+          $downloadDir = "$env:TEMP\RdpRestore"
+          New-Item -Path $downloadDir -ItemType Directory -Force
+
+          Write-Host "Attempting to download backup from release '$releaseTag'..."
+          gh release download $releaseTag --repo "${{ github.repository }}" --dir $downloadDir --pattern "*.zip"
+          
+          $backupArchive = Get-ChildItem -Path $downloadDir -Filter "*.zip" | Select-Object -First 1
+          if ($backupArchive) {
+              Write-Host "SUCCESS: Found backup archive: $($backupArchive.Name)"
+              $restorePath = "$downloadDir\extracted"
+              Expand-Archive -Path $backupArchive.FullName -DestinationPath $restorePath -Force
+              
+              # Restore Theme
+              $regFile = Join-Path $restorePath "theme_settings.reg"
+              if (Test-Path $regFile) {
+                  Write-Host "Restoring theme settings..."
+                  reg import $regFile
+              }
+
+              # Restore Edge Data
+              $edgeBackupPath = Join-Path $restorePath "Edge_User_Data"
+              $edgeTargetPath = "$userProfilePath\AppData\Local\Microsoft\Edge\User Data"
+              if (Test-Path $edgeBackupPath) {
+                  Write-Host "Restoring Microsoft Edge data..."
+                  Remove-Item -Path $edgeTargetPath -Recurse -Force -ErrorAction SilentlyContinue
+                  Copy-Item -Path $edgeBackupPath -Destination $edgeTargetPath -Recurse -Force
+                  Write-Host "Granting user ownership of restored Edge files..."
+                  icacls "$edgeTargetPath" /grant "$env:RDP_USER:(OI)(CI)F" /T
+              }
+              Write-Host "Profile restore complete."
+          } else {
+              Write-Host "INFO: No backup release found. This is normal for a first run. Starting with a fresh profile."
+          }
+
+      - name: "[SETUP 7/9] Prepare User Environment"
         env:
           RDP_USER: ${{ secrets.RDP_USERNAME }}
           GIT_PAT_SECRET: ${{ secrets.GIT_PAT }}
         shell: powershell
         run: |
           $userProfile = "C:\Users\$env:RDP_USER"
-          $startupFolder = "$userProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
           $desktopFolder = "$userProfile\Desktop"
-          $restoreSourceDir = "$userProfile\Documents\RDP_Backup_Source"
           $backupScriptSourcePath = ".\rdp-tools\backup.ps1"
           $backupScriptDestPath = Join-Path $desktopFolder "backup.ps1"
 
           # Create directories if they don't exist
-          New-Item -Path $startupFolder, $desktopFolder, $restoreSourceDir -ItemType Directory -Force | Out-Null
+          New-Item -Path $desktopFolder -ItemType Directory -Force | Out-Null
           
-          # --- INJECT THE PAT INTO THE BACKUP SCRIPT ---
-          # Read the script, replace the placeholder with the actual secret, and write it to the user's desktop
+          # Inject the PAT into the backup script and place it on the desktop
           (Get-Content -Path $backupScriptSourcePath -Raw) -replace 'GIT_PAT_PLACEHOLDER', $env:GIT_PAT_SECRET | Set-Content -Path $backupScriptDestPath
           
-          # Copy restore script and ALL backed up data to a source folder for the script to use
-          Copy-Item -Path ".\rdp-tools\*" -Destination $restoreSourceDir -Recurse -Force
-          
-          # Place the restore script in the user's startup folder
-          Copy-Item -Path ".\rdp-tools\restore.ps1" -Destination $startupFolder
+          Write-Host "SUCCESS: 'backup.ps1' script is configured and placed on the user's desktop."
 
-          Write-Host "SUCCESS: User environment configured. Backup script is on the desktop and restore script will run at login."
-          
-      - name: "[SETUP 7/8] Verify RDP Accessibility"
+      - name: "[SETUP 8/9] Verify RDP Accessibility"
         run: |
-          Write-Host "Tailscale IP assigned: $env:TAILSCALE_IP"
-          Write-Host "Verifying RDP port 3389 is accessible..."
+          # (Your existing RDP verification step - no changes needed)
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) { Write-Error "CRITICAL: RDP port 3389 is not accessible."; exit 1 }
           Write-Host "SUCCESS: RDP port is open and accessible over Tailscale."
 
-      - name: "[ACTIVE 8/8] Maintain Session"
+      - name: "[ACTIVE 9/9] Maintain Session"
         shell: powershell
         run: |
+          # (Your existing session maintenance step - no changes needed)
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "======================================================"
-          Write-Host "NOTE: On first login, settings will be restored automatically."
+          Write-Host "NOTE: Your profile has been restored from the last backup."
           Write-Host "      To save new changes, run the 'backup.ps1' script on the Desktop."
           
           while ($true) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session is active. Cancel the workflow run to terminate."
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session is active."
               Start-Sleep -Seconds 300
           }
