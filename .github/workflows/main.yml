@@ -12,9 +12,9 @@ jobs:
       - name: "[SETUP 1/8] Checkout Repository for Scripts"
         uses: actions/checkout@v3
         with:
-          repository: 'cradixo/tailwind-rdp' # Your repo with the scripts
+          repository: 'cradixo/tailwind-rdp'
           token: ${{ secrets.GIT_PAT }}
-          path: 'rdp-tools' # Checkout to a specific sub-directory
+          path: 'rdp-tools'
 
       - name: "[SETUP 2/8] Forcefully Cleanup Stale Tailscale Device via API"
         env:
@@ -46,10 +46,7 @@ jobs:
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
-          if (-not (Get-LocalUser -Name "$env:RDP_USER")) {
-              Write-Error "CRITICAL: User creation failed."
-              exit 1
-          }
+          if (-not (Get-LocalUser -Name "$env:RDP_USER")) { Write-Error "CRITICAL: User creation failed."; exit 1 }
           Write-Host "SUCCESS: User '$($env:RDP_USER)' created."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
@@ -66,10 +63,7 @@ jobs:
               if (-not $tsIP) { Start-Sleep -Seconds 5 }
               $retries++
           }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned after 60 seconds. Exiting."
-              exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned after 60 seconds. Exiting."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: "[SETUP 6/8] Prepare User Environment for Backup/Restore"
@@ -82,14 +76,15 @@ jobs:
           $startupFolder = "$userProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
           $desktopFolder = "$userProfile\Desktop"
           $restoreSourceDir = "$userProfile\Documents\RDP_Backup_Source"
+          $backupScriptSourcePath = ".\rdp-tools\backup.ps1"
+          $backupScriptDestPath = Join-Path $desktopFolder "backup.ps1"
 
           # Create directories if they don't exist
-          New-Item -Path $startupFolder -ItemType Directory -Force
-          New-Item -Path $desktopFolder -ItemType Directory -Force
-          New-Item -Path $restoreSourceDir -ItemType Directory -Force
-
-          # Copy backup script to desktop
-          Copy-Item -Path ".\rdp-tools\backup.ps1" -Destination $desktopFolder
+          New-Item -Path $startupFolder, $desktopFolder, $restoreSourceDir -ItemType Directory -Force | Out-Null
+          
+          # --- INJECT THE PAT INTO THE BACKUP SCRIPT ---
+          # Read the script, replace the placeholder with the actual secret, and write it to the user's desktop
+          (Get-Content -Path $backupScriptSourcePath -Raw) -replace 'GIT_PAT_PLACEHOLDER', $env:GIT_PAT_SECRET | Set-Content -Path $backupScriptDestPath
           
           # Copy restore script and ALL backed up data to a source folder for the script to use
           Copy-Item -Path ".\rdp-tools\*" -Destination $restoreSourceDir -Recurse -Force
@@ -97,21 +92,14 @@ jobs:
           # Place the restore script in the user's startup folder
           Copy-Item -Path ".\rdp-tools\restore.ps1" -Destination $startupFolder
 
-          # Set the GIT_PAT as a persistent environment variable for the user
-          # This is the secure way to pass the secret to the manual script
-          [System.Environment]::SetEnvironmentVariable('GIT_PAT', $env:GIT_PAT_SECRET, [System.EnvironmentVariableTarget]::User)
-
-          Write-Host "SUCCESS: User environment configured. Restore script will run at login."
+          Write-Host "SUCCESS: User environment configured. Backup script is on the desktop and restore script will run at login."
           
       - name: "[SETUP 7/8] Verify RDP Accessibility"
         run: |
           Write-Host "Tailscale IP assigned: $env:TAILSCALE_IP"
           Write-Host "Verifying RDP port 3389 is accessible..."
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "CRITICAL: TCP connection to RDP port 3389 over Tailscale IP failed."
-              exit 1
-          }
+          if (-not $testResult.TcpTestSucceeded) { Write-Error "CRITICAL: RDP port 3389 is not accessible."; exit 1 }
           Write-Host "SUCCESS: RDP port is open and accessible over Tailscale."
 
       - name: "[ACTIVE 8/8] Maintain Session"
