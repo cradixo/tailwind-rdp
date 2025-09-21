@@ -6,16 +6,22 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      - name: "[SETUP 1/6] Forcefully Cleanup Stale Tailscale Device via API"
+      - name: "[SETUP 1/8] Checkout Repository for Scripts"
+        uses: actions/checkout@v3
+        with:
+          repository: 'cradixo/tailwind-rdp' # Your repo with the scripts
+          token: ${{ secrets.GIT_PAT }}
+          path: 'rdp-tools' # Checkout to a specific sub-directory
+
+      - name: "[SETUP 2/8] Forcefully Cleanup Stale Tailscale Device via API"
         env:
           TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
           TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
           HOSTNAME: "cardersparadox"
         run: |
-          # This script ensures that any old machine with the same name is removed from your tailnet, allowing the name to be reused.
           $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
           $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
           try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
@@ -25,27 +31,21 @@ jobs:
             Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
           } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
 
-      - name: "[SETUP 2/6] Configure Core RDP Settings"
+      - name: "[SETUP 3/8] Configure Core RDP Settings"
         run: |
-          # Enable RDP and set security layers for broader compatibility, similar to the OG script.
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          
-          # Add a firewall rule to allow RDP connections.
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: "[SETUP 3/6] Create RDP User"
+      - name: "[SETUP 4/8] Create RDP User"
         env:
-          RDP_USER: "cardersparadox"
-          RDP_PASS: "Carding.Git!2024"
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
-          # This is a more reliable way to create the user without force-creating the profile, which caused the previous error.
-          # The user profile will be created automatically on the first RDP login.
           $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
-
           if (-not (Get-LocalUser -Name "$env:RDP_USER")) {
               Write-Error "CRITICAL: User creation failed."
               exit 1
@@ -53,38 +53,60 @@ jobs:
           Write-Host "SUCCESS: User '$($env:RDP_USER)' created."
           echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
           echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
-      
-      - name: "[SETUP 4/6] Install and Connect Tailscale"
+
+      - name: "[SETUP 5/8] Install and Connect Tailscale"
         run: |
-          # Install the latest version of Tailscale silently.
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          
-          # Connect to Tailscale using your auth key and the desired static hostname.
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
-          
-          # Robustly wait for the Tailscale IP to be assigned.
-          $tsIP = $null
-          $retries = 0
+          $tsIP = $null; $retries = 0
           Write-Host "Waiting for Tailscale IP address..."
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
               if (-not $tsIP) { Start-Sleep -Seconds 5 }
               $retries++
           }
-          
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned after 60 seconds. Exiting."
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: "[SETUP 5/6] Verify RDP Accessibility"
+      - name: "[SETUP 6/8] Prepare User Environment for Backup/Restore"
+        env:
+          RDP_USER: ${{ secrets.RDP_USERNAME }}
+          GIT_PAT_SECRET: ${{ secrets.GIT_PAT }}
+        shell: powershell
+        run: |
+          $userProfile = "C:\Users\$env:RDP_USER"
+          $startupFolder = "$userProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          $desktopFolder = "$userProfile\Desktop"
+          $restoreSourceDir = "$userProfile\Documents\RDP_Backup_Source"
+
+          # Create directories if they don't exist
+          New-Item -Path $startupFolder -ItemType Directory -Force
+          New-Item -Path $desktopFolder -ItemType Directory -Force
+          New-Item -Path $restoreSourceDir -ItemType Directory -Force
+
+          # Copy backup script to desktop
+          Copy-Item -Path ".\rdp-tools\backup.ps1" -Destination $desktopFolder
+          
+          # Copy restore script and ALL backed up data to a source folder for the script to use
+          Copy-Item -Path ".\rdp-tools\*" -Destination $restoreSourceDir -Recurse -Force
+          
+          # Place the restore script in the user's startup folder
+          Copy-Item -Path ".\rdp-tools\restore.ps1" -Destination $startupFolder
+
+          # Set the GIT_PAT as a persistent environment variable for the user
+          # This is the secure way to pass the secret to the manual script
+          [System.Environment]::SetEnvironmentVariable('GIT_PAT', $env:GIT_PAT_SECRET, [System.EnvironmentVariableTarget]::User)
+
+          Write-Host "SUCCESS: User environment configured. Restore script will run at login."
+          
+      - name: "[SETUP 7/8] Verify RDP Accessibility"
         run: |
           Write-Host "Tailscale IP assigned: $env:TAILSCALE_IP"
           Write-Host "Verifying RDP port 3389 is accessible..."
-          
-          # Test connectivity to the RDP port over the Tailscale network.
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "CRITICAL: TCP connection to RDP port 3389 over Tailscale IP failed."
@@ -92,17 +114,17 @@ jobs:
           }
           Write-Host "SUCCESS: RDP port is open and accessible over Tailscale."
 
-      - name: "[ACTIVE 6/6] Maintain Session"
+      - name: "[ACTIVE 8/8] Maintain Session"
         shell: powershell
         run: |
-          # Display the final connection details.
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "======================================================"
+          Write-Host "NOTE: On first login, settings will be restored automatically."
+          Write-Host "      To save new changes, run the 'backup.ps1' script on the Desktop."
           
-          # Infinite loop to keep the GitHub Actions runner alive.
           while ($true) {
               Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Heartbeat: Session is active. Cancel the workflow run to terminate."
               Start-Sleep -Seconds 300
