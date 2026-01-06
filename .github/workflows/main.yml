@@ -1,181 +1,87 @@
-name: RDP-Persistent-Session-Advanced
+name: RDP-Static-Persistent-Final
 
-# This allows the workflow to be triggered manually from the Actions tab
 on:
   workflow_dispatch:
-
-# Grant the workflow permission to write back to the repository for settings backup
-permissions:
-  contents: write
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360 # Standard 6-hour maximum for GitHub Actions jobs
+    timeout-minutes: 3600
 
     steps:
-      - name: "[SETUP 1/8] Checkout Repository"
-        # We need the code checked out to read/write the settings files
-        uses: actions/checkout@v4
+      - name: Create Staging Directory
+        run: New-Item -Path "D:\a\cache-staging" -ItemType Directory -Force
 
-      - name: "[SETUP 2/8] Forcefully Cleanup Stale Tailscale Device via API"
-        env:
-          TS_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
-          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
-          HOSTNAME: "cardersparadox"
-        run: |
-          # This script ensures that any old machine with the same name is removed from your tailnet, allowing the name to be reused.
-          $headers = @{ "Authorization" = "Bearer $($env:TS_API_KEY)" }
-          $devicesUri = "https://api.tailscale.com/api/v2/tailnet/$($env:TS_TAILNET)/devices"
-          try { $devices = Invoke-RestMethod -Uri $devicesUri -Headers $headers } catch { Write-Error "API call failed."; exit 1 }
-          $device = $devices.devices | Where-Object { $_.hostname -eq $env:HOSTNAME }
-          if ($device) {
-            Write-Host "Found and deleting old device '$($device.hostname)'."
-            Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($device.id)" -Method Delete -Headers $headers
-          } else { Write-Host "No previous device named '$($env:HOSTNAME)' found." }
+      - name: Restore Settings to Staging Area
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: D:\a\cache-staging
+          key: rdp-user-settings-v2
 
-      - name: "[SETUP 3/8] Configure Core RDP Settings"
+      - name: Configure Core RDP Settings
         run: |
-          # Enable RDP and set security layers for broader compatibility.
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          # Add a firewall rule to allow RDP connections.
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-
-      - name: "[SETUP 4/8] Create RDP User"
+      - name: Create RDP User and Apply Settings
+        run: |
+          $username = "cardersparadox"
+          $password = "Carding.Git!2024"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          
+          # This step now runs AFTER the user is created, ensuring the destination directory exists.
+          if ($env:CACHE_HIT -eq 'true') {
+            Write-Host "Applying restored settings from cache..."
+            # Create the destination AppData folder structure before copying
+            New-Item -Path "C:\Users\$username\AppData\Local\Microsoft" -ItemType Directory -Force
+            # Copy restored files to the new user's profile
+            Copy-Item -Path "D:\a\cache-staging\Edge" -Destination "C:\Users\$username\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "D:\a\cache-staging\NTUSER.DAT" -Destination "C:\Users\$username\" -Force -ErrorAction SilentlyContinue
+          }
+          
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
         env:
-          RDP_USER: "cardersparadox"
-          RDP_PASS: "Carding.Git!2024"
-        run: |
-          # Creates the local user and adds them to the appropriate groups.
-          $securePass = ConvertTo-SecureString -String "$env:RDP_PASS" -AsPlainText -Force
-          New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
+          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
 
-          if (-not (Get-LocalUser -Name "$env:RDP_USER")) {
-              Write-Error "CRITICAL: User creation failed."
-              exit 1
-          }
-          Write-Host "SUCCESS: User '$($env:RDP_USER)' created."
-          echo "RDP_USER=$($env:RDP_USER)" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$($env:RDP_PASS)" >> $env:GITHUB_ENV
-
-      - name: "[SETUP 5/8] Restore User Settings"
-        # This step runs before the user logs in to apply previously saved settings.
+      - name: Install and Connect Tailscale
         run: |
-          $SettingsPath = "${{ github.workspace }}\rdp-settings"
-          if (Test-Path -Path $SettingsPath) {
-              Write-Host "Found settings directory. Attempting to restore..."
-              $RegFiles = Get-ChildItem -Path $SettingsPath -Filter *.reg
-              if ($RegFiles) {
-                  foreach ($file in $RegFiles) {
-                      Write-Host "Importing settings from $($file.Name)..."
-                      reg import "$($file.FullName)"
-                  }
-                  Write-Host "SUCCESS: User settings restored."
-              } else {
-                  Write-Host "No .reg files found in settings directory. Skipping restore."
-              }
-          } else {
-              Write-Host "No settings directory found. A new one will be created on first backup."
-          }
-
-      - name: "[SETUP 6/8] Install and Connect Tailscale"
-        run: |
-          # Install the latest version of Tailscale silently.
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          
-          # Connect to Tailscale using your auth key and the desired static hostname.
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
           
-          # Robustly wait for the Tailscale IP to be assigned.
-          $tsIP = $null
-          $retries = 0
-          Write-Host "Waiting for Tailscale IP address..."
+          $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-              if (-not $tsIP) { Start-Sleep -Seconds 5 }
-              $retries++
+              Start-Sleep -Seconds 5; $retries++
           }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned after 60 seconds. Exiting."
-              exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: "[SETUP 7/8] Verify RDP Accessibility"
-        run: |
-          Write-Host "Tailscale IP assigned: $env:TAILSCALE_IP"
-          Write-Host "Verifying RDP port 3389 is accessible..."
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "CRITICAL: TCP connection to RDP port 3389 over Tailscale IP failed."
-              exit 1
-          }
-          Write-Host "SUCCESS: RDP port is open and accessible over Tailscale."
-
-      - name: "[ACTIVE 8/8] Maintain Session & Backup Settings"
+      
+      - name: Maintain Session and Auto-Save Settings
         shell: powershell
         run: |
-          # Display the final connection details.
           Write-Host "================ RDP ACCESS ================"
-          Write-Host "Address:  cardersparadox OR $env:TAILSCALE_IP"
+          Write-Host "Address: cardersparadox"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "======================================================"
+          Write-Host "============================================"
           
-          # This loop keeps the runner alive and performs periodic backups.
+          $userProfilePath = "C:\Users\cardersparadox"
+          $stagingPath = "D:\a\cache-staging"
           while ($true) {
-              $HeartbeatTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$HeartbeatTime] Heartbeat: Session active. Next backup check in 5 minutes."
-              Start-Sleep -Seconds 300
-              
-              $BackupTime = (Get-Date).ToString("HH:mm:ss")
-              Write-Host "[$BackupTime] Running periodic settings backup..."
-              
-              # Define where to store settings and which registry keys to back up
-              $SettingsPath = "${{ github.workspace }}\rdp-settings"
-              $UserRegistryPath = "HKEY_USERS\S-1-5-21-*" # Path will be resolved dynamically
-              $UserProfile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object { $_.LocalPath.split('\')[-1] -eq "$env:RDP_USER" }
-              if ($UserProfile) {
-                  $UserRegistryPath = "HKEY_USERS\$($UserProfile.SID)"
-              } else {
-                  Write-Warning "Could not find SID for user $env:RDP_USER. Backup may fail."
-                  # Fallback for older systems, less reliable
-                  $UserRegistryPath = "HKEY_CURRENT_USER"
-              }
-
-              $KeysToBackup = @{
-                "Themes" = "$UserRegistryPath\Software\Microsoft\Windows\CurrentVersion\Themes"
-                "Desktop" = "$UserRegistryPath\Control Panel\Desktop"
-                "Colors" = "$UserRegistryPath\Control Panel\Colors"
-                "Explorer" = "$UserRegistryPath\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-              }
-              
-              # Create directory if it doesn't exist
-              if (-not (Test-Path $SettingsPath)) { New-Item -Path $SettingsPath -ItemType Directory }
-              
-              # Export registry keys
-              foreach ($name in $KeysToBackup.Keys) {
-                  reg export "$($KeysToBackup[$name])" "$SettingsPath\$name.reg" /y
-              }
-              
-              # Configure Git
-              git config --global user.name "GitHub Actions Backup Bot"
-              git config --global user.email "actions-bot@github.com"
-              
-              # Commit and push changes if any exist
-              git add $SettingsPath\*.reg
-              $Changes = git status --porcelain
-              if ($Changes) {
-                  Write-Host "Changes detected in user settings. Committing to repository..."
-                  git commit -m "feat: Auto-backup user settings at $(Get-Date)"
-                  git push
-                  Write-Host "SUCCESS: Settings backed up."
-              } else {
-                  Write-Host "No changes in user settings detected. Skipping commit."
-              }
+            Write-Host "[$(Get-Date)] Auto-saving settings to staging area..."
+            Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\Edge" -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "$userProfilePath\NTUSER.DAT" -Destination "$stagingPath\" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 300
           }
+          
+      - name: Save Staged Settings to Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: D:\a\cache-staging
+          key: ${{ steps.cache-restore.outputs.cache-primary-key || 'rdp-user-settings-v2' }}
