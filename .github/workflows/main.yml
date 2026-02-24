@@ -61,8 +61,8 @@ jobs:
           $startupFolder = "C:\Users\cardersparadox\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
           New-Item -Path $startupFolder -ItemType Directory -Force
           
-          # Using array pipelining to avoid all YAML parser/whitespace breakages.
-          # Single quotes are used to securely pass variable names without evaluating them in the runner.
+          # Using array pipelining to avoid all YAML parser breakages.
+          # The Start-Sleep interval is set to exactly 60 seconds (1 minute).
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
@@ -100,8 +100,7 @@ jobs:
               '}',
               '',
               'while ($true) {',
-              '    Start-Sleep -Seconds 300',
-              '    Write-Log "Initiating 5-minute routine sync and export cycle..."',
+              '    Write-Log "Initiating routine 1-minute sync and export cycle..."',
               '    ',
               '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
@@ -115,6 +114,7 @@ jobs:
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
+              '    git config --global core.safecrlf false',
               '    ',
               '    Write-Log "Pulling latest remote changes (rebase)..."',
               '    $pullOutput = git pull origin main --rebase 2>&1',
@@ -131,6 +131,9 @@ jobs:
               '        $pushOutput = git push origin main 2>&1',
               '        Write-Log "Git Push Output: $pushOutput"',
               '    }',
+              '    ',
+              '    Write-Log "Cycle complete. Sleeping for 1 minute before next sync..."',
+              '    Start-Sleep -Seconds 60',
               '}'
           )
           $syncScript | Out-File -FilePath "$startupFolder\StateSync.ps1" -Encoding UTF8
@@ -156,7 +159,7 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Maintain Runner Session
+      - name: Maintain Runner Session (Live Logs)
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
@@ -164,11 +167,87 @@ jobs:
           Write-Host "Username: cardersparadox"
           Write-Host "Password: Carding.Git!2024"
           Write-Host "============================================"
-          Write-Host "Connecting via RDP will launch the invisible Sync & Logging Agent."
-          Write-Host "Taskbar settings and detailed Session Logs will automatically push to your 'tailwind-rdp' repo every 5 minutes."
+          Write-Host "Connecting via RDP will INSTANTLY launch the invisible Sync & Logging Agent."
+          Write-Host "Check the console below for LIVE telemetry streaming directly from your RDP session..."
+          Write-Host "-----------------------------------------------------------------------------------"
           
-          # This blocking loop forces the Azure VM to stay alive for 350 minutes, executing the "exploit" mechanism.
+          $logFile = "C:\state-repo\Logs\SyncAgent.log"
           $endTime = (Get-Date).AddMinutes(350)
+          $lastPosition = 0
+          
+          # Dynamic Non-Blocking File Stream Reader
           while ((Get-Date) -lt $endTime) {
-              Start-Sleep -Seconds 60
+              if (Test-Path $logFile) {
+                  $file = Get-Item $logFile
+                  if ($file.Length -gt $lastPosition) {
+                      # Open with ReadWrite share to completely avoid locking out the background agent
+                      $fs = [System.IO.FileStream]::new($logFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                      $fs.Seek($lastPosition, [System.IO.SeekOrigin]::Begin) | Out-Null
+                      $reader = [System.IO.StreamReader]::new($fs)
+                      
+                      while (-not $reader.EndOfStream) {
+                          Write-Host $reader.ReadLine()
+                      }
+                      
+                      $lastPosition = $fs.Position
+                      $reader.Close()
+                      $fs.Close()
+                  }
+              }
+              Start-Sleep -Seconds 5
           }
+
+      - name: Emergency Backup on Cancellation/Timeout
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "================ EMERGENCY TEARDOWN ================"
+          Write-Host "Job concluded or was manually cancelled. Performing emergency background backup..."
+          $stateRepo = 'C:\state-repo'
+          
+          if (-not (Test-Path $stateRepo)) {
+              Write-Host "State repository was never cloned. Skipping emergency backup."
+              exit 0
+          }
+          
+          try {
+              # Resolve the unique SID for the RDP user context to bypass the runneradmin barrier
+              $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
+              $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
+              
+              if (Test-Path "Registry::HKEY_USERS\$sid") {
+                  Write-Host "Target user hive (SID: $sid) is actively loaded. Exporting final state..."
+                  New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null
+                  
+                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
+                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
+                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
+                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
+                  reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
+                  
+                  Write-Host "Registry successfully extracted cross-profile."
+              } else {
+                  Write-Host "User hive not loaded. User likely logged out manually before cancellation."
+              }
+          } catch {
+              Write-Host "Error calculating SID: $($_.Exception.Message)"
+          }
+          
+          Write-Host "Pushing final emergency state to repository..."
+          Set-Location $stateRepo
+          git config user.name "Emergency Sync Agent"
+          git config user.email "agent@rdp.local"
+          git config --global core.safecrlf false
+          
+          git pull origin main --rebase
+          $status = git status --porcelain Registry/ Logs/
+          if ($status) {
+              git add Registry\*.reg Logs\*.log
+              $commitMsg = "Emergency Auto-save Windows UI $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+              git commit -m "$commitMsg"
+              git push origin main
+              Write-Host "Emergency backup successfully pushed to GitHub."
+          } else {
+              Write-Host "No registry changes detected during emergency scan. Repository is up-to-date."
+          }
+          Write-Host "===================================================="
