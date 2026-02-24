@@ -60,9 +60,9 @@ jobs:
 
       - name: Deploy High-Privilege Telemetry Agent
         run: |
-          # CRITICAL FIX: Writing script directly to shared folder and using Scheduled Tasks for elevated execution
           $agentPath = "C:\state-repo\StateSync.ps1"
           
+          # Universal SID-Routing Implementation to prevent Identity/Context Isolation bugs
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
@@ -79,14 +79,23 @@ jobs:
               '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
               '}',
               '',
+              '# Calculate the precise RDP SID to forcefully bypass the runneradmin execution context',
+              '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
+              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
+              '',
               'Write-Log "========================================"',
-              'Write-Log "Sync Agent Initialized with Highest Privileges. User: $env:USERNAME"',
+              'Write-Log "Sync Agent Initialized. Mapped Target RDP SID: $sid"',
               'Write-Log "========================================"',
               '',
               'if (-not (Test-Path $restoredFlag)) {',
               '    if (Test-Path "$stateRepo\Registry") {',
-              '        Write-Log "Found existing Registry backups. Starting UI configuration import..."',
+              '        Write-Log "Found existing Registry backups. Starting precise UI configuration import..."',
               '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
+              '            # Dynamically inject the correct SID into the text file so the import succeeds cross-profile',
+              '            $regContent = Get-Content $_.FullName',
+              '            $regContent = $regContent -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
+              '            $regContent | Out-File -FilePath $_.FullName -Encoding Unicode',
+              '            ',
               '            $importResult = Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait -PassThru',
               '            Write-Log "Imported $($_.Name) with exit code: $($importResult.ExitCode)"',
               '        }',
@@ -101,24 +110,25 @@ jobs:
               '',
               'while ($true) {',
               '    Write-Log "Initiating routine 1-minute sync and export cycle..."',
-              '    ',
-              '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
-              '    ',
-              '    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
-              '    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
-              '    reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
-              '    reg export "HKCU\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
-              '    reg export "HKCU\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
-              '    Write-Log "Native registry keys exported successfully."',
-              '    ',
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
               '    git config --global core.safecrlf false',
               '    ',
+              '    # Pulled to the top to prevent dirty rebase warnings',
               '    Write-Log "Pulling latest remote changes (rebase)..."',
               '    $pullOutput = git pull origin main --rebase 2>&1',
               '    Write-Log "Git Pull Output: $pullOutput"',
+              '    ',
+              '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
+              '    ',
+              '    # Export strictly from the calculated mathematical SID to prevent empty runneradmin backups',
+              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
+              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
+              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
+              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
+              '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
+              '    Write-Log "Native cross-profile registry keys exported successfully."',
               '    ',
               '    $status = git status --porcelain',
               '    if ($status) {',
@@ -210,13 +220,20 @@ jobs:
           }
           
           try {
-              # Resolve the unique SID for the RDP user context to bypass the runneradmin barrier
               $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
               
               if (Test-Path "Registry::HKEY_USERS\$sid") {
                   Write-Host "Target user hive (SID: $sid) is actively loaded. Exporting final state..."
                   New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null
+                  
+                  Set-Location $stateRepo
+                  git config user.name "Emergency Sync Agent"
+                  git config user.email "agent@rdp.local"
+                  git config --global core.safecrlf false
+                  
+                  # Git pull executes BEFORE export to eliminate rebase warnings
+                  git pull origin main --rebase
                   
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
@@ -225,30 +242,21 @@ jobs:
                   reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
                   
                   Write-Host "Registry successfully extracted cross-profile."
+                  
+                  git add .
+                  $status = git status --porcelain
+                  if ($status) {
+                      $commitMsg = "Emergency Auto-save Windows UI $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                      git commit -m "$commitMsg"
+                      git push origin main
+                      Write-Host "Emergency backup successfully pushed to GitHub."
+                  } else {
+                      Write-Host "No registry changes detected during emergency scan. Repository is up-to-date."
+                  }
               } else {
                   Write-Host "User hive not loaded. User likely logged out manually before cancellation."
               }
           } catch {
               Write-Host "Error calculating SID: $($_.Exception.Message)"
-          }
-          
-          Write-Host "Pushing final emergency state to repository..."
-          Set-Location $stateRepo
-          git config user.name "Emergency Sync Agent"
-          git config user.email "agent@rdp.local"
-          git config --global core.safecrlf false
-          
-          git pull origin main --rebase
-          
-          # CRITICAL FIX: Safe pathing avoids the fatal syntax error
-          git add .
-          $status = git status --porcelain
-          if ($status) {
-              $commitMsg = "Emergency Auto-save Windows UI $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-              git commit -m "$commitMsg"
-              git push origin main
-              Write-Host "Emergency backup successfully pushed to GitHub."
-          } else {
-              Write-Host "No registry changes detected during emergency scan. Repository is up-to-date."
           }
           Write-Host "===================================================="
