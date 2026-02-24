@@ -47,9 +47,29 @@ jobs:
       - name: Deploy Smart Telemetry Agent & Manual Tools
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
-          $desktopPath = "C:\Users\cardersparadox\Desktop"
           
-          # 1. THE MAIN BACKGROUND AGENT
+          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (To be moved to desktop later)
+          $backupScript = @(
+              'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
+              'Set-Location "C:\state-repo"',
+              'git add .',
+              'git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
+              'git push origin main',
+              'Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
+              'Pause'
+          )
+          $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
+
+          $restoreScript = @(
+              'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
+              'Stop-Process -Name "powershell" -Force -ErrorAction SilentlyContinue',
+              'Start-Process -FilePath "powershell.exe" -ArgumentList "-File C:\state-repo\StateSync.ps1" -Verb RunAs',
+              'Write-Host "Restore Triggered." -ForegroundColor Cyan',
+              'Pause'
+          )
+          $restoreScript | Out-File -FilePath "C:\state-repo\Force-Restore.ps1" -Encoding UTF8
+
+          # 2. THE MAIN BACKGROUND AGENT
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
@@ -68,12 +88,15 @@ jobs:
               '',
               '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
               'if ($env:USERNAME -ne "cardersparadox") {',
-              '    Write-Log "ABORT: Script launched by $env:USERNAME. Waiting for cardersparadox."',
               '    exit',
               '}',
               '',
               '# Wait for Explorer (Desktop) to be ready',
               'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
+              '',
+              '# COPY MANUAL TOOLS TO DESKTOP NOW THAT PROFILE EXISTS',
+              'Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
+              'Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
               '',
               '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
               '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
@@ -108,7 +131,6 @@ jobs:
               '    ',
               '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
-              '    # Export Registry',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
@@ -121,7 +143,6 @@ jobs:
               '    ',
               '    if ($regStatus) {',
               '        Write-Log "SETTINGS CHANGED. Committing..."',
-              '        # Now we add the log file too, since the settings changed',
               '        git add .',
               '        $msg = "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')"',
               '        git commit -m "$msg" 2>&1 | Out-Null',
@@ -136,29 +157,7 @@ jobs:
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
 
-          # 2. CREATE MANUAL "FORCE BACKUP" SCRIPT ON DESKTOP
-          $backupScript = @(
-              'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
-              'Set-Location "C:\state-repo"',
-              'git add .',
-              'git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
-              'git push origin main',
-              'Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
-              'Pause'
-          )
-          $backupScript | Out-File -FilePath "$desktopPath\Force-Backup.ps1" -Encoding UTF8
-
-          # 3. CREATE MANUAL "FORCE RESTORE" SCRIPT ON DESKTOP
-          $restoreScript = @(
-              'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
-              'Stop-Process -Name "powershell" -Force -ErrorAction SilentlyContinue # Kill background agent temporarily',
-              'Start-Process -FilePath "powershell.exe" -ArgumentList "-File C:\state-repo\StateSync.ps1" -Verb RunAs',
-              'Write-Host "Restore Triggered. Explorer will restart shortly." -ForegroundColor Cyan',
-              'Pause'
-          )
-          $restoreScript | Out-File -FilePath "$desktopPath\Force-Restore.ps1" -Encoding UTF8
-          
-          # REGISTER TASK (Strictly bound to cardersparadox credentials to prevent Ghost Runs)
+          # REGISTER TASK
           $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
           $trigger = New-ScheduledTaskTrigger -AtLogOn -User "cardersparadox"
           $password = "Carding.Git!2024"
