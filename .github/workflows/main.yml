@@ -62,7 +62,6 @@ jobs:
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # Universal SID-Routing Implementation to prevent Identity/Context Isolation bugs
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
@@ -79,7 +78,18 @@ jobs:
               '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
               '}',
               '',
-              '# Calculate the precise RDP SID to forcefully bypass the runneradmin execution context',
+              '# Safety Guard: Ensure we are in the correct user context',
+              'if ($env:USERNAME -ne "cardersparadox") {',
+              '    Write-Log "CRITICAL: Script started in wrong user context ($env:USERNAME). Aborting to prevent corruption."',
+              '    exit',
+              '}',
+              '',
+              '# Wait for Windows Explorer to fully load (DWM) before attempting restore',
+              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {',
+              '    Start-Sleep -Seconds 2',
+              '}',
+              '',
+              '# Calculate the precise RDP SID',
               '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
               '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
               '',
@@ -89,9 +99,10 @@ jobs:
               '',
               'if (-not (Test-Path $restoredFlag)) {',
               '    if (Test-Path "$stateRepo\Registry") {',
-              '        Write-Log "Found existing Registry backups. Starting precise UI configuration import..."',
+              '        Write-Log "*** RESTORATION SEQUENCE STARTED ***"',
+              '        Write-Log "Found existing Registry backups. Applying configurations..."',
               '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
-              '            # Dynamically inject the correct SID into the text file so the import succeeds cross-profile',
+              '            # Dynamically inject the correct SID into the text file',
               '            $regContent = Get-Content $_.FullName',
               '            $regContent = $regContent -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
               '            $regContent | Out-File -FilePath $_.FullName -Encoding Unicode',
@@ -101,11 +112,11 @@ jobs:
               '        }',
               '        Write-Log "Restarting Windows Explorer to instantly apply visual changes."',
               '        Stop-Process -Name explorer -Force',
+              '        Write-Log "*** RESTORATION COMPLETED SUCCESSFULLY ***"',
               '    } else {',
               '        Write-Log "No existing Registry folder found. Proceeding with fresh configuration."',
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
-              '    Write-Log "Restoration flag created. Skipping future imports for this session."',
               '}',
               '',
               'while ($true) {',
@@ -122,7 +133,7 @@ jobs:
               '    ',
               '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
-              '    # Export strictly from the calculated mathematical SID to prevent empty runneradmin backups',
+              '    # Export strictly from the calculated mathematical SID',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
@@ -148,11 +159,12 @@ jobs:
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
           
-          # Registering Task Scheduler to run silently, securely, and with UAC bypass upon login.
+          # CRITICAL FIX: Register Task strictly for the 'cardersparadox' identity to kill Ghost Runs
           $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
           $trigger = New-ScheduledTaskTrigger -AtLogOn -User "cardersparadox"
-          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
-          Write-Host "Elevated telemetry agent successfully registered."
+          $password = "Carding.Git!2024"
+          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -RunLevel Highest -User "cardersparadox" -Password $password -Force | Out-Null
+          Write-Host "Elevated telemetry agent successfully registered for user: cardersparadox"
 
       - name: Install and Connect Tailscale
         run: |
