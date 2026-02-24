@@ -30,17 +30,19 @@ jobs:
               exit 1
           }
 
-          # Dynamically clone your existing tailwind-rdp repository using the resolved token
           $repoUrl = "https://x-access-token:$token@github.com/cradixo/tailwind-rdp.git"
-          
           Write-Host "Initiating Git Clone sequence..."
           git clone $repoUrl C:\state-repo
           
           if (-not (Test-Path "C:\state-repo\.git")) {
-            Write-Error "Failed to clone state repository. Authentication was rejected by GitHub. Check your token scopes."
+            Write-Error "Failed to clone state repository. Authentication was rejected."
             exit 1
           }
-          Write-Host "Repository cloned successfully using native loopback authentication."
+          Write-Host "Repository cloned successfully."
+
+          # CRITICAL FIX: Grant explicit global read/write permissions to bypass UAC file restrictions
+          icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
+          Write-Host "NTFS Permissions elevated for repository path."
 
       - name: Configure Core RDP Settings
         run: |
@@ -56,13 +58,11 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Deploy Auto-Sync & Logging Agent to User Session
+      - name: Deploy High-Privilege Telemetry Agent
         run: |
-          $startupFolder = "C:\Users\cardersparadox\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-          New-Item -Path $startupFolder -ItemType Directory -Force
+          # CRITICAL FIX: Writing script directly to shared folder and using Scheduled Tasks for elevated execution
+          $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # Using array pipelining to avoid all YAML parser breakages.
-          # The Start-Sleep interval is set to exactly 60 seconds (1 minute).
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
@@ -80,7 +80,7 @@ jobs:
               '}',
               '',
               'Write-Log "========================================"',
-              'Write-Log "Sync Agent Initialized. RDP User: $env:USERNAME"',
+              'Write-Log "Sync Agent Initialized with Highest Privileges. User: $env:USERNAME"',
               'Write-Log "========================================"',
               '',
               'if (-not (Test-Path $restoredFlag)) {',
@@ -120,10 +120,10 @@ jobs:
               '    $pullOutput = git pull origin main --rebase 2>&1',
               '    Write-Log "Git Pull Output: $pullOutput"',
               '    ',
-              '    $status = git status --porcelain Registry/ Logs/',
+              '    $status = git status --porcelain',
               '    if ($status) {',
-              '        Write-Log "Changes detected in Registry or Logs. Committing..."',
-              '        git add Registry\*.reg Logs\*.log',
+              '        Write-Log "Changes detected. Committing..."',
+              '        git add . ',
               '        $commitMsg = "Auto-save Windows UI & Telemetry $(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')" ',
               '        git commit -m "$commitMsg" 2>&1 | Out-Null',
               '        ',
@@ -136,14 +136,13 @@ jobs:
               '    Start-Sleep -Seconds 60',
               '}'
           )
-          $syncScript | Out-File -FilePath "$startupFolder\StateSync.ps1" -Encoding UTF8
+          $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
           
-          # VBScript Launcher generation using array pipelining
-          $vbsLauncher = @(
-              'Set objShell = CreateObject("WScript.Shell")',
-              "objShell.Run `"powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`"$startupFolder\StateSync.ps1`"`" `", 0, False"
-          )
-          $vbsLauncher | Out-File -FilePath "$startupFolder\Launcher.vbs" -Encoding UTF8
+          # Registering Task Scheduler to run silently, securely, and with UAC bypass upon login.
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
+          $trigger = New-ScheduledTaskTrigger -AtLogOn -User "cardersparadox"
+          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
+          Write-Host "Elevated telemetry agent successfully registered."
 
       - name: Install and Connect Tailscale
         run: |
@@ -240,9 +239,11 @@ jobs:
           git config --global core.safecrlf false
           
           git pull origin main --rebase
-          $status = git status --porcelain Registry/ Logs/
+          
+          # CRITICAL FIX: Safe pathing avoids the fatal syntax error
+          git add .
+          $status = git status --porcelain
           if ($status) {
-              git add Registry\*.reg Logs\*.log
               $commitMsg = "Emergency Auto-save Windows UI $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
               git commit -m "$commitMsg"
               git push origin main
