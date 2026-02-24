@@ -13,81 +13,71 @@ function Write-Log {
     Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8
 }
 
-# Safety Guard: Ensure we are in the correct user context
+# --- GUARD CLAUSE: KILL GHOST RUNS ---
 if ($env:USERNAME -ne "cardersparadox") {
-    Write-Log "CRITICAL: Script started in wrong user context ($env:USERNAME). Aborting to prevent corruption."
     exit
 }
 
-# Wait for Windows Explorer to fully load (DWM) before attempting restore
-while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
-    Start-Sleep -Seconds 2
-}
+# Wait for Explorer (Desktop) to be ready
+while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }
 
-# Calculate the precise RDP SID
+# COPY MANUAL TOOLS TO DESKTOP NOW THAT PROFILE EXISTS
+Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force
+Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force
+
 $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
 $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
 
-Write-Log "========================================"
-Write-Log "Sync Agent Initialized. Mapped Target RDP SID: $sid"
-Write-Log "========================================"
+Write-Log "=== AGENT STARTED: $sid ==="
 
+# --- ONE-TIME RESTORATION PHASE ---
 if (-not (Test-Path $restoredFlag)) {
     if (Test-Path "$stateRepo\Registry") {
-        Write-Log "*** RESTORATION SEQUENCE STARTED ***"
-        Write-Log "Found existing Registry backups. Applying configurations..."
+        Write-Log "Found backup. Restoring..."
         Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { 
-            # Dynamically inject the correct SID into the text file
-            $regContent = Get-Content $_.FullName
-            $regContent = $regContent -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
-            $regContent | Out-File -FilePath $_.FullName -Encoding Unicode
-            
-            $importResult = Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait -PassThru
-            Write-Log "Imported $($_.Name) with exit code: $($importResult.ExitCode)"
+            $content = Get-Content $_.FullName
+            $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
+            $content | Out-File -FilePath $_.FullName -Encoding Unicode
+            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait
         }
-        Write-Log "Restarting Windows Explorer to instantly apply visual changes."
         Stop-Process -Name explorer -Force
-        Write-Log "*** RESTORATION COMPLETED SUCCESSFULLY ***"
-    } else {
-        Write-Log "No existing Registry folder found. Proceeding with fresh configuration."
+        Write-Log "Restoration Complete."
     }
     New-Item -Path $restoredFlag -ItemType File | Out-Null
 }
 
+# --- CONTINUOUS BACKUP LOOP ---
 while ($true) {
-    Write-Log "Initiating routine 1-minute sync and export cycle..."
     Set-Location $stateRepo
     git config user.name "RDP Sync Agent"
     git config user.email "agent@rdp.local"
     git config --global core.safecrlf false
     
-    # Pulled to the top to prevent dirty rebase warnings
-    Write-Log "Pulling latest remote changes (rebase)..."
-    $pullOutput = git pull origin main --rebase 2>&1
-    Write-Log "Git Pull Output: $pullOutput"
+    Write-Log "Sync Cycle: Checking for remote updates..."
+    git pull origin main --rebase 2>&1 | Out-Null
     
     New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null
     
-    # Export strictly from the calculated mathematical SID
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
     reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
-    Write-Log "Native cross-profile registry keys exported successfully."
     
-    $status = git status --porcelain
-    if ($status) {
-        Write-Log "Changes detected. Committing..."
-        git add . 
-        $commitMsg = "Auto-save Windows UI & Telemetry $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 
-        git commit -m "$commitMsg" 2>&1 | Out-Null
-        
-        Write-Log "Pushing to GitHub..."
-        $pushOutput = git push origin main 2>&1
-        Write-Log "Git Push Output: $pushOutput"
+    # SMART CHANGE DETECTION: Only commit if Registry files changed
+    git add Registry/*.reg
+    $regStatus = git status --porcelain Registry/
+    
+    if ($regStatus) {
+        Write-Log "SETTINGS CHANGED. Committing..."
+        git add .
+        $msg = "Auto-save Settings $(Get-Date -Format 'HH:mm:ss')"
+        git commit -m "$msg" 2>&1 | Out-Null
+        git push origin main 2>&1
+        Write-Log "Push Complete."
+    } else {
+        Write-Log "No setting changes detected. Skipping Push."
     }
     
-    Write-Log "Cycle complete. Sleeping for 1 minute before next sync..."
-    Start-Sleep -Seconds 60
+    Start-Sleep -Seconds 300
 }
