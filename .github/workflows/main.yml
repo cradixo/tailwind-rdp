@@ -27,8 +27,7 @@ jobs:
           
           if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
           
-          # CRITICAL FIX: Grant Full Access to Everyone. 
-          # This allows the Startup Script (Standard User) to write logs/backups without Admin UAC.
+          # Grant Full Access to Everyone (Fixes Permissions)
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -45,11 +44,11 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Deploy Bug-Free Smart Agent
+      - name: Deploy Ghost-Proof Smart Agent
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE MANUAL TOOLS IN REPO FOLDER
+          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (Safe Location)
           $backupScript = @(
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location "C:\state-repo"',
@@ -87,13 +86,15 @@ jobs:
               '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
               '}',
               '',
-              '# --- GUARD CLAUSE: DOUBLE CHECK USER ---',
+              '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
+              '# Since we use Global Startup, this script runs for everyone.',
+              '# We must KILL it if the user is not cardersparadox.',
               'if ($env:USERNAME -ne "cardersparadox") { exit }',
               '',
               '# Wait for Explorer to be ready',
               'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
               '',
-              '# COPY MANUAL TOOLS TO DESKTOP',
+              '# COPY MANUAL TOOLS TO DESKTOP (Now that profile exists)',
               'Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
               'Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
               '',
@@ -130,7 +131,6 @@ jobs:
               '    ',
               '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
-              '    # Export Registry',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
@@ -138,10 +138,7 @@ jobs:
               '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
               '    ',
               '    # SMART CHANGE DETECTION',
-              '    # 1. Stage only .reg files',
               '    git add Registry/*.reg',
-              '    ',
-              '    # 2. Check if they are different from the repo',
               '    $regStatus = git status --porcelain Registry/',
               '    ',
               '    if ($regStatus) {',
@@ -158,15 +155,15 @@ jobs:
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
 
-          # 3. INSTALL TO STARTUP FOLDER (The Ghost-Proof Method)
-          # We use a Batch file wrapper to ensure it runs invisibly and reliably on login.
-          $startupPath = "C:\Users\cardersparadox\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\StartAgent.bat"
+          # 3. INSTALL TO GLOBAL STARTUP FOLDER (Always exists, unlike user profile)
+          # We use ProgramData (All Users) so we don't crash trying to find the user's folder.
+          $globalStartup = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\StartAgent.bat"
           $batContent = 'powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\state-repo\StateSync.ps1"'
-          Set-Content -Path $startupPath -Value $batContent
+          Set-Content -Path $globalStartup -Value $batContent
           
-          # 4. CLEANUP PREVIOUS LOGS TO PREVENT CONFUSION
+          # 4. CLEANUP PREVIOUS LOGS
           if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
-          Write-Host "Agent installed to Startup. Logs cleared."
+          Write-Host "Agent installed to Global Startup. Logs cleared."
 
       - name: Install and Connect Tailscale
         run: |
