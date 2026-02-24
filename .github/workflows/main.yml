@@ -48,7 +48,7 @@ jobs:
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (Safe Location - copied to desktop later)
+          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (Safe Location)
           $backupScript = @(
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location "C:\state-repo"',
@@ -94,7 +94,7 @@ jobs:
               '# Wait for Explorer (Desktop) to be ready',
               'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
               '',
-              '# COPY MANUAL TOOLS TO DESKTOP NOW THAT PROFILE EXISTS',
+              '# COPY MANUAL TOOLS TO DESKTOP',
               'Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
               'Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
               '',
@@ -143,7 +143,6 @@ jobs:
               '    ',
               '    if ($regStatus) {',
               '        Write-Log "SETTINGS CHANGED. Committing..."',
-              '        # We commit all changes (including log) ONLY if settings changed',
               '        git add .',
               '        $msg = "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')"',
               '        git commit -m "$msg" 2>&1 | Out-Null',
