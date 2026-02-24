@@ -158,3 +158,20 @@
 [2026-02-24 20:21:58] Pushing to GitHub...
 [2026-02-24 20:21:59] Git Push Output: 
 [2026-02-24 20:21:59] Cycle complete. Sleeping for 1 minute before next sync...
+[2026-02-24 20:26:18] ========================================
+[2026-02-24 20:26:18] Sync Agent Initialized. Mapped Target RDP SID: S-1-5-21-1289122292-2527870611-1685296598-1003
+[2026-02-24 20:26:18] ========================================
+[2026-02-24 20:26:18] *** RESTORATION SEQUENCE STARTED ***
+[2026-02-24 20:26:18] Found existing Registry backups. Applying configurations...
+[2026-02-24 20:26:21] Imported Desktop.reg with exit code: 0
+[2026-02-24 20:26:22] Imported DWM.reg with exit code: 0
+[2026-02-24 20:26:23] Imported ExplorerAdvanced.reg with exit code: 0
+[2026-02-24 20:26:24] Imported Personalize.reg with exit code: 0
+[2026-02-24 20:26:25] Imported StuckRects3.reg with exit code: 0
+[2026-02-24 20:26:25] Restarting Windows Explorer to instantly apply visual changes.
+[2026-02-24 20:26:35] *** RESTORATION COMPLETED SUCCESSFULLY ***
+[2026-02-24 20:26:35] Initiating routine 1-minute sync and export cycle...
+[2026-02-24 20:26:36] Pulling latest remote changes (rebase)...
+[2026-02-24 20:26:42] Git Pull Output: 
+[2026-02-24 20:26:43] Native cross-profile registry keys exported successfully.
+[2026-02-24 20:26:44] Changes detected. Committing...

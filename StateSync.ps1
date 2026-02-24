@@ -13,7 +13,18 @@ function Write-Log {
     Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8
 }
 
-# Calculate the precise RDP SID to forcefully bypass the runneradmin execution context
+# Safety Guard: Ensure we are in the correct user context
+if ($env:USERNAME -ne "cardersparadox") {
+    Write-Log "CRITICAL: Script started in wrong user context ($env:USERNAME). Aborting to prevent corruption."
+    exit
+}
+
+# Wait for Windows Explorer to fully load (DWM) before attempting restore
+while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+    Start-Sleep -Seconds 2
+}
+
+# Calculate the precise RDP SID
 $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
 $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
 
@@ -23,9 +34,10 @@ Write-Log "========================================"
 
 if (-not (Test-Path $restoredFlag)) {
     if (Test-Path "$stateRepo\Registry") {
-        Write-Log "Found existing Registry backups. Starting precise UI configuration import..."
+        Write-Log "*** RESTORATION SEQUENCE STARTED ***"
+        Write-Log "Found existing Registry backups. Applying configurations..."
         Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { 
-            # Dynamically inject the correct SID into the text file so the import succeeds cross-profile
+            # Dynamically inject the correct SID into the text file
             $regContent = Get-Content $_.FullName
             $regContent = $regContent -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
             $regContent | Out-File -FilePath $_.FullName -Encoding Unicode
@@ -35,11 +47,11 @@ if (-not (Test-Path $restoredFlag)) {
         }
         Write-Log "Restarting Windows Explorer to instantly apply visual changes."
         Stop-Process -Name explorer -Force
+        Write-Log "*** RESTORATION COMPLETED SUCCESSFULLY ***"
     } else {
         Write-Log "No existing Registry folder found. Proceeding with fresh configuration."
     }
     New-Item -Path $restoredFlag -ItemType File | Out-Null
-    Write-Log "Restoration flag created. Skipping future imports for this session."
 }
 
 while ($true) {
@@ -56,7 +68,7 @@ while ($true) {
     
     New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null
     
-    # Export strictly from the calculated mathematical SID to prevent empty runneradmin backups
+    # Export strictly from the calculated mathematical SID
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
