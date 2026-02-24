@@ -1,4 +1,4 @@
-name: RDP-Static-Persistent-Final
+name: Almost bug free
 
 on:
   workflow_dispatch:
