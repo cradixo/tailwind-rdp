@@ -6,24 +6,27 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      - name: Create Staging Directory
-        run: New-Item -Path "D:\a\cache-staging" -ItemType Directory -Force
-
-      - name: Restore Settings to Staging Area
-        id: cache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: D:\a\cache-staging
-          key: rdp-user-settings-v2
+      - name: Clone Existing Tailwind Repository
+        shell: powershell
+        run: |
+          # Dynamically clone your existing tailwind-rdp repository bypassing password prompts
+          $repoUrl = "https://x-access-token:${{ secrets.GH_PAT }}@github.com/cradixo/tailwind-rdp.git"
+          git clone $repoUrl C:\state-repo
+          
+          if (-not (Test-Path "C:\state-repo\.git")) {
+            Write-Error "Failed to clone state repository. Ensure 'cradixo/tailwind-rdp' exists and GH_PAT secret is correct."
+            exit 1
+          }
 
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-      - name: Create RDP User and Apply Settings
+
+      - name: Create RDP User
         run: |
           $username = "cardersparadox"
           $password = "Carding.Git!2024"
@@ -31,21 +34,97 @@ jobs:
           New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
+      - name: Deploy Auto-Sync & Logging Agent to User Session
+        run: |
+          $startupFolder = "C:\Users\cardersparadox\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          New-Item -Path $startupFolder -ItemType Directory -Force
           
-          # This step now runs AFTER the user is created, ensuring the destination directory exists.
-          if ($env:CACHE_HIT -eq 'true') {
-            Write-Host "Applying restored settings from cache..."
-            # Create the destination AppData folder structure before copying
-            New-Item -Path "C:\Users\$username\AppData\Local\Microsoft" -ItemType Directory -Force
-            # Copy restored files to the new user's profile
-            Copy-Item -Path "D:\a\cache-staging\Edge" -Destination "C:\Users\$username\AppData\Local\Microsoft\" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "D:\a\cache-staging\NTUSER.DAT" -Destination "C:\Users\$username\" -Force -ErrorAction SilentlyContinue
+          # Creating the advanced payload script with file-backed logging
+          $syncScript = @"
+          `$ErrorActionPreference = 'SilentlyContinue'
+          `$stateRepo = 'C:\state-repo'
+          `$logDir = "`$stateRepo\Logs"
+          `$logFile = "`$logDir\SyncAgent.log"
+          `$restoredFlag = "`$env:TEMP\registry_restored.flag"
+
+          # Ensure Log Directory Exists
+          if (-not (Test-Path `$logDir)) { New-Item -Path `$logDir -ItemType Directory -Force | Out-Null }
+
+          # Centralized Timestamp Logging Function
+          function Write-Log {
+              param([string]`$Message)
+              `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              `$logLine = "[`$timestamp] `$Message"
+              Out-File -FilePath `$logFile -InputObject `$logLine -Append -Encoding UTF8
           }
+
+          Write-Log "========================================"
+          Write-Log "Sync Agent Initialized. RDP User: `$env:USERNAME"
+          Write-Log "========================================"
+
+          # 1. First-Run Registry Import (Injects Personalization & Taskbar configurations)
+          if (-not (Test-Path `$restoredFlag)) {
+              if (Test-Path "`$stateRepo\Registry") {
+                  Write-Log "Found existing Registry backups. Starting UI configuration import..."
+                  Get-ChildItem -Path "`$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { 
+                      `$importResult = Start-Process -FilePath "reg.exe" -ArgumentList "import `"`$(`$_.FullName)`"" -Wait -PassThru
+                      Write-Log "Imported `$(`$_.Name) with exit code: `$(`$importResult.ExitCode)"
+                  }
+                  Write-Log "Restarting Windows Explorer to instantly apply visual changes."
+                  Stop-Process -Name explorer -Force
+              } else {
+                  Write-Log "No existing Registry folder found. Proceeding with fresh configuration."
+              }
+              New-Item -Path `$restoredFlag -ItemType File | Out-Null
+              Write-Log "Restoration flag created. Skipping future imports for this session."
+          }
+
+          # 2. Continuous Synchronization & Telemetry Loop
+          while (`$true) {
+              Start-Sleep -Seconds 300
+              Write-Log "Initiating 5-minute routine sync and export cycle..."
+              
+              New-Item -Path "`$stateRepo\Registry" -ItemType Directory -Force | Out-Null
+              
+              # Export crucial Configurations
+              reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "`$stateRepo\Registry\Personalize.reg" /y
+              reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "`$stateRepo\Registry\ExplorerAdvanced.reg" /y
+              reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "`$stateRepo\Registry\StuckRects3.reg" /y
+              reg export "HKCU\Software\Microsoft\Windows\DWM" "`$stateRepo\Registry\DWM.reg" /y
+              reg export "HKCU\Control Panel\Desktop" "`$stateRepo\Registry\Desktop.reg" /y
+              Write-Log "Native registry keys exported successfully."
+              
+              # Push mutations (and this exact log file) to GitHub
+              Set-Location `$stateRepo
+              git config user.name "RDP Sync Agent"
+              git config user.email "agent@rdp.local"
+              
+              Write-Log "Pulling latest remote changes (rebase)..."
+              `$pullOutput = git pull origin main --rebase 2>&1
+              Write-Log "Git Pull Output: `$pullOutput"
+              
+              `$status = git status --porcelain Registry/ Logs/
+              if (`$status) {
+                  Write-Log "Changes detected in Registry or Logs. Committing..."
+                  git add Registry\*.reg Logs\*.log
+                  `$commitMsg = "Auto-save Windows UI & Telemetry `$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                  git commit -m "`$commitMsg" 2>&1 | Out-Null
+                  
+                  Write-Log "Pushing to GitHub..."
+                  `$pushOutput = git push origin main 2>&1
+                  Write-Log "Git Push Output: `$pushOutput"
+              }
+          }
+          "@
+          Out-File -FilePath "$startupFolder\StateSync.ps1" -InputObject $syncScript -Encoding UTF8
           
-          echo "RDP_USER=$username" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-        env:
-          CACHE_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
+          # VBScript to ensure the PowerShell agent runs invisibly on login without disturbing the user
+          $vbsLauncher = @"
+          Set objShell = CreateObject("WScript.Shell")
+          objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$startupFolder\StateSync.ps1""", 0, False
+          "@
+          Out-File -FilePath "$startupFolder\Launcher.vbs" -InputObject $vbsLauncher -Encoding UTF8
 
       - name: Install and Connect Tailscale
         run: |
@@ -55,33 +134,25 @@ jobs:
           
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+              $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
               Start-Sleep -Seconds 5; $retries++
           }
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Maintain Session and Auto-Save Settings
+
+      - name: Maintain Runner Session
         shell: powershell
         run: |
           Write-Host "================ RDP ACCESS ================"
-          Write-Host "Address: cardersparadox"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Username: cardersparadox"
+          Write-Host "Password: Carding.Git!2024"
           Write-Host "============================================"
+          Write-Host "Connecting via RDP will launch the invisible Sync & Logging Agent."
+          Write-Host "Taskbar settings and detailed Session Logs will automatically push to your 'tailwind-rdp' repo every 5 minutes."
           
-          $userProfilePath = "C:\Users\cardersparadox"
-          $stagingPath = "D:\a\cache-staging"
-          while ($true) {
-            Write-Host "[$(Get-Date)] Auto-saving settings to staging area..."
-            Copy-Item -Path "$userProfilePath\AppData\Local\Microsoft\Edge" -Destination "$stagingPath\Edge" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "$userProfilePath\NTUSER.DAT" -Destination "$stagingPath\" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 300
+          # This blocking loop forces the Azure VM to stay alive for 350 minutes, executing the "exploit" mechanism.
+          $endTime = (Get-Date).AddMinutes(350)
+          while ((Get-Date) -lt $endTime) {
+              Start-Sleep -Seconds 60
           }
-          
-      - name: Save Staged Settings to Cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: D:\a\cache-staging
-          key: ${{ steps.cache-restore.outputs.cache-primary-key || 'rdp-user-settings-v2' }}
