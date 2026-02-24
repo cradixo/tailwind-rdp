@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # Crucial: Grants the native GITHUB_TOKEN permission to push state logs
+  contents: write
 
 jobs:
   secure-rdp:
@@ -27,7 +27,7 @@ jobs:
           
           if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
           
-          # Grant Full Access to Everyone (Fixes Permissions)
+          # Grant Full Access to Everyone - This is critical for cross-user operations
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -44,11 +44,11 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Deploy Ghost-Proof Smart Agent
+      - name: Deploy Bulletproof Telemetry Agent
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (Safe Location)
+          # 1. CREATE MANUAL TOOLS IN REPO FOLDER
           $backupScript = @(
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location "C:\state-repo"',
@@ -63,6 +63,8 @@ jobs:
           $restoreScript = @(
               'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
               'Stop-Process -Name "powershell" -Force -ErrorAction SilentlyContinue',
+              '$restoredFlag = "$env:TEMP\registry_restored.flag"',
+              'if(Test-Path $restoredFlag) { Remove-Item $restoredFlag -Force }',
               'Start-Process -FilePath "powershell.exe" -ArgumentList "-File C:\state-repo\StateSync.ps1" -Verb RunAs',
               'Write-Host "Restore Triggered." -ForegroundColor Cyan',
               'Pause'
@@ -72,6 +74,9 @@ jobs:
           # 2. THE MAIN BACKGROUND AGENT
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
+              '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
+              'if ($env:USERNAME -ne "cardersparadox") { exit }',
+              '',
               '$stateRepo = ''C:\state-repo''',
               '$logDir = "$stateRepo\Logs"',
               '$logFile = "$logDir\SyncAgent.log"',
@@ -86,15 +91,8 @@ jobs:
               '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
               '}',
               '',
-              '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
-              '# Since we use Global Startup, this script runs for everyone.',
-              '# We must KILL it if the user is not cardersparadox.',
-              'if ($env:USERNAME -ne "cardersparadox") { exit }',
+              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }',
               '',
-              '# Wait for Explorer to be ready',
-              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
-              '',
-              '# COPY MANUAL TOOLS TO DESKTOP (Now that profile exists)',
               'Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
               'Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
               '',
@@ -124,12 +122,7 @@ jobs:
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
-              '    git config --global core.safecrlf false',
-              '    ',
-              '    # Sync with Repo',
               '    git pull origin main --rebase 2>&1 | Out-Null',
-              '    ',
-              '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
@@ -137,7 +130,6 @@ jobs:
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
               '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
               '    ',
-              '    # SMART CHANGE DETECTION',
               '    git add Registry/*.reg',
               '    $regStatus = git status --porcelain Registry/',
               '    ',
@@ -155,15 +147,14 @@ jobs:
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
 
-          # 3. INSTALL TO GLOBAL STARTUP FOLDER (Always exists, unlike user profile)
-          # We use ProgramData (All Users) so we don't crash trying to find the user's folder.
-          $globalStartup = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\StartAgent.bat"
-          $batContent = 'powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\state-repo\StateSync.ps1"'
-          Set-Content -Path $globalStartup -Value $batContent
-          
-          # 4. CLEANUP PREVIOUS LOGS
+          # 3. REGISTER TASK WITH SYSTEM-LEVEL PRIVILEGES
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
+          $trigger = New-ScheduledTaskTrigger -AtLogOn
+          $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
+          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+
           if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
-          Write-Host "Agent installed to Global Startup. Logs cleared."
+          Write-Host "Bulletproof Agent Registered."
 
       - name: Install and Connect Tailscale
         run: |
@@ -228,16 +219,16 @@ jobs:
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
                   
+                  # CRITICAL FIX: Reset local changes to guarantee pull succeeds
+                  git reset --hard HEAD
                   git pull origin main --rebase 2>&1 | Out-Null
                   
-                  # Export
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
                   reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
                   
-                  # Smart Commit (Only if settings changed)
                   git add Registry/*.reg
                   if (git status --porcelain Registry/) {
                       git add .
