@@ -48,7 +48,7 @@ jobs:
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (To be moved to desktop later)
+          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (Safe Location - copied to desktop later)
           $backupScript = @(
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location "C:\state-repo"',
@@ -143,6 +143,7 @@ jobs:
               '    ',
               '    if ($regStatus) {',
               '        Write-Log "SETTINGS CHANGED. Committing..."',
+              '        # We commit all changes (including log) ONLY if settings changed',
               '        git add .',
               '        $msg = "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')"',
               '        git commit -m "$msg" 2>&1 | Out-Null',
