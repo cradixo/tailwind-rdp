@@ -3,6 +3,9 @@ name: RDP-Static-Persistent-Final
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write  # Crucial: Grants the native GITHUB_TOKEN permission to push state logs
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
@@ -11,15 +14,33 @@ jobs:
     steps:
       - name: Clone Existing Tailwind Repository
         shell: powershell
+        env:
+          MY_PAT: ${{ secrets.GH_PAT }}
+          NATIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Dynamically clone your existing tailwind-rdp repository bypassing password prompts
-          $repoUrl = "https://x-access-token:${{ secrets.GH_PAT }}@github.com/cradixo/tailwind-rdp.git"
+          # Intelligent fallback: Use custom GH_PAT if it exists, otherwise fall back to native repo token.
+          $token = $env:MY_PAT
+          if ([string]::IsNullOrWhiteSpace($token)) {
+              Write-Host "GH_PAT secret is empty or missing. Falling back to built-in GITHUB_TOKEN..."
+              $token = $env:NATIVE_TOKEN
+          }
+          
+          if ([string]::IsNullOrWhiteSpace($token)) {
+              Write-Error "CRITICAL FAILURE: Both GH_PAT and GITHUB_TOKEN are empty. Cannot authenticate to GitHub."
+              exit 1
+          }
+
+          # Dynamically clone your existing tailwind-rdp repository using the resolved token
+          $repoUrl = "https://x-access-token:$token@github.com/cradixo/tailwind-rdp.git"
+          
+          Write-Host "Initiating Git Clone sequence..."
           git clone $repoUrl C:\state-repo
           
           if (-not (Test-Path "C:\state-repo\.git")) {
-            Write-Error "Failed to clone state repository. Ensure 'cradixo/tailwind-rdp' exists and GH_PAT secret is correct."
+            Write-Error "Failed to clone state repository. Authentication was rejected by GitHub. Check your token scopes."
             exit 1
           }
+          Write-Host "Repository cloned successfully using native loopback authentication."
 
       - name: Configure Core RDP Settings
         run: |
@@ -122,37 +143,4 @@ jobs:
           # VBScript to ensure the PowerShell agent runs invisibly on login without disturbing the user
           $vbsLauncher = @"
           Set objShell = CreateObject("WScript.Shell")
-          objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$startupFolder\StateSync.ps1""", 0, False
-          "@
-          Out-File -FilePath "$startupFolder\Launcher.vbs" -InputObject $vbsLauncher -Encoding UTF8
-
-      - name: Install and Connect Tailscale
-        run: |
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
-          Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
-          
-          $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
-              Start-Sleep -Seconds 5; $retries++
-          }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: Maintain Runner Session
-        shell: powershell
-        run: |
-          Write-Host "================ RDP ACCESS ================"
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username: cardersparadox"
-          Write-Host "Password: Carding.Git!2024"
-          Write-Host "============================================"
-          Write-Host "Connecting via RDP will launch the invisible Sync & Logging Agent."
-          Write-Host "Taskbar settings and detailed Session Logs will automatically push to your 'tailwind-rdp' repo every 5 minutes."
-          
-          # This blocking loop forces the Azure VM to stay alive for 350 minutes, executing the "exploit" mechanism.
-          $endTime = (Get-Date).AddMinutes(350)
-          while ((Get-Date) -lt $endTime) {
-              Start-Sleep -Seconds 60
-          }
+          objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$sta
