@@ -1,4 +1,4 @@
-name: Almost bug free
+name: RDP-Static-Persistent-Final
 
 on:
   workflow_dispatch:
@@ -27,7 +27,6 @@ jobs:
           
           if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
           
-          # Grant Full Access to Everyone - This is critical for cross-user operations
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -44,64 +43,77 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Deploy Bulletproof Telemetry Agent
+      - name: Deploy Bulletproof Telemetry Agent & Manual Tools
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE MANUAL TOOLS IN REPO FOLDER
+          # 1. CREATE ROBUST MANUAL TOOLS IN REPO FOLDER
+          # This backup script is now self-contained and exports a fresh snapshot first.
           $backupScript = @(
+              '$stateRepo = ''C:\state-repo''',
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
-              'Set-Location "C:\state-repo"',
+              'Set-Location $stateRepo',
+              '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
+              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
+              'Write-Host "Exporting current settings for SID: $sid..."',
+              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
+              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
+              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
+              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
+              'reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
+              'Write-Host "Committing and Pushing to GitHub..."',
               'git add .',
               'git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
               'git push origin main',
               'Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
-              'Pause'
+              'Start-Sleep -Seconds 5'
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
+          # This restore script is now self-contained and performs the full logic.
           $restoreScript = @(
+              '$stateRepo = ''C:\state-repo''',
               'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
-              'Stop-Process -Name "powershell" -Force -ErrorAction SilentlyContinue',
-              '$restoredFlag = "$env:TEMP\registry_restored.flag"',
-              'if(Test-Path $restoredFlag) { Remove-Item $restoredFlag -Force }',
-              'Start-Process -FilePath "powershell.exe" -ArgumentList "-File C:\state-repo\StateSync.ps1" -Verb RunAs',
-              'Write-Host "Restore Triggered." -ForegroundColor Cyan',
-              'Pause'
+              'Set-Location $stateRepo',
+              'Write-Host "Pulling latest settings from GitHub..."',
+              'git reset --hard HEAD',
+              'git pull origin main --rebase',
+              '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
+              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
+              'Write-Host "Applying settings for SID: $sid..."',
+              'if (Test-Path "$stateRepo\Registry") {',
+              '    Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
+              '        $content = Get-Content $_.FullName',
+              '        $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
+              '        $content | Out-File -FilePath $_.FullName -Encoding Unicode',
+              '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
+              '    }',
+              '    Write-Host "Restarting Explorer to apply changes..."',
+              '    Stop-Process -Name explorer -Force',
+              '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
+              '} else {',
+              '    Write-Host "No registry backup found in repository!" -ForegroundColor Red',
+              '}',
+              'Start-Sleep -Seconds 5'
           )
           $restoreScript | Out-File -FilePath "C:\state-repo\Force-Restore.ps1" -Encoding UTF8
 
           # 2. THE MAIN BACKGROUND AGENT
           $syncScript = @(
-              '$ErrorActionPreference = ''SilentlyContinue''',
-              '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
               'if ($env:USERNAME -ne "cardersparadox") { exit }',
-              '',
+              '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
               '$logDir = "$stateRepo\Logs"',
               '$logFile = "$logDir\SyncAgent.log"',
               '$restoredFlag = "$env:TEMP\registry_restored.flag"',
-              '',
               'if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }',
-              '',
-              'function Write-Log {',
-              '    param([string]$Message)',
-              '    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"',
-              '    $logLine = "[$timestamp] $Message"',
-              '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
-              '}',
-              '',
+              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; $logLine = "[$timestamp] $Message"; Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8 }',
               'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }',
-              '',
               'Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
               'Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
-              '',
               '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
               '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
-              '',
               'Write-Log "=== AGENT STARTED: $sid ==="',
-              '',
-              '# --- ONE-TIME RESTORATION PHASE ---',
               'if (-not (Test-Path $restoredFlag)) {',
               '    if (Test-Path "$stateRepo\Registry") {',
               '        Write-Log "Found backup. Restoring..."',
@@ -116,23 +128,18 @@ jobs:
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
               '}',
-              '',
-              '# --- CONTINUOUS BACKUP LOOP ---',
               'while ($true) {',
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
               '    git pull origin main --rebase 2>&1 | Out-Null',
-              '    ',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
               '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
-              '    ',
               '    git add Registry/*.reg',
               '    $regStatus = git status --porcelain Registry/',
-              '    ',
               '    if ($regStatus) {',
               '        Write-Log "SETTINGS CHANGED. Committing..."',
               '        git add .',
@@ -140,8 +147,9 @@ jobs:
               '        git commit -m "$msg" 2>&1 | Out-Null',
               '        git push origin main 2>&1',
               '        Write-Log "Push Complete."',
+              '    } else {',
+              '        Write-Log "No setting changes detected."',
               '    }',
-              '    ',
               '    Start-Sleep -Seconds 300',
               '}'
           )
