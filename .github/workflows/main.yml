@@ -27,7 +27,8 @@ jobs:
           
           if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
           
-          # Grant Full Access to Everyone to prevent Permission/UAC errors
+          # CRITICAL FIX: Grant Full Access to Everyone. 
+          # This allows the Startup Script (Standard User) to write logs/backups without Admin UAC.
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -44,11 +45,11 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Deploy Smart Telemetry Agent & Manual Tools
+      - name: Deploy Bug-Free Smart Agent
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE MANUAL TOOLS IN REPO FOLDER (Safe Location)
+          # 1. CREATE MANUAL TOOLS IN REPO FOLDER
           $backupScript = @(
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location "C:\state-repo"',
@@ -86,12 +87,10 @@ jobs:
               '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
               '}',
               '',
-              '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
-              'if ($env:USERNAME -ne "cardersparadox") {',
-              '    exit',
-              '}',
+              '# --- GUARD CLAUSE: DOUBLE CHECK USER ---',
+              'if ($env:USERNAME -ne "cardersparadox") { exit }',
               '',
-              '# Wait for Explorer (Desktop) to be ready',
+              '# Wait for Explorer to be ready',
               'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
               '',
               '# COPY MANUAL TOOLS TO DESKTOP',
@@ -126,19 +125,23 @@ jobs:
               '    git config user.email "agent@rdp.local"',
               '    git config --global core.safecrlf false',
               '    ',
-              '    Write-Log "Sync Cycle: Checking for remote updates..."',
+              '    # Sync with Repo',
               '    git pull origin main --rebase 2>&1 | Out-Null',
               '    ',
               '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
+              '    # Export Registry',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
               '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
               '    ',
-              '    # SMART CHANGE DETECTION: Only commit if Registry files changed',
+              '    # SMART CHANGE DETECTION',
+              '    # 1. Stage only .reg files',
               '    git add Registry/*.reg',
+              '    ',
+              '    # 2. Check if they are different from the repo',
               '    $regStatus = git status --porcelain Registry/',
               '    ',
               '    if ($regStatus) {',
@@ -148,8 +151,6 @@ jobs:
               '        git commit -m "$msg" 2>&1 | Out-Null',
               '        git push origin main 2>&1',
               '        Write-Log "Push Complete."',
-              '    } else {',
-              '        Write-Log "No setting changes detected. Skipping Push."',
               '    }',
               '    ',
               '    Start-Sleep -Seconds 300',
@@ -157,12 +158,15 @@ jobs:
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
 
-          # REGISTER TASK
-          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
-          $trigger = New-ScheduledTaskTrigger -AtLogOn -User "cardersparadox"
-          $password = "Carding.Git!2024"
-          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -RunLevel Highest -User "cardersparadox" -Password $password -Force | Out-Null
-          Write-Host "Smart Agent Registered."
+          # 3. INSTALL TO STARTUP FOLDER (The Ghost-Proof Method)
+          # We use a Batch file wrapper to ensure it runs invisibly and reliably on login.
+          $startupPath = "C:\Users\cardersparadox\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\StartAgent.bat"
+          $batContent = 'powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\state-repo\StateSync.ps1"'
+          Set-Content -Path $startupPath -Value $batContent
+          
+          # 4. CLEANUP PREVIOUS LOGS TO PREVENT CONFUSION
+          if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
+          Write-Host "Agent installed to Startup. Logs cleared."
 
       - name: Install and Connect Tailscale
         run: |
