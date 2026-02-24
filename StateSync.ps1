@@ -1,4 +1,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
+# --- GUARD CLAUSE: KILL GHOST RUNS ---
+if ($env:USERNAME -ne "cardersparadox") { exit }
+
 $stateRepo = 'C:\state-repo'
 $logDir = "$stateRepo\Logs"
 $logFile = "$logDir\SyncAgent.log"
@@ -13,15 +16,8 @@ function Write-Log {
     Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8
 }
 
-# --- GUARD CLAUSE: KILL GHOST RUNS ---
-if ($env:USERNAME -ne "cardersparadox") {
-    exit
-}
+while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
 
-# Wait for Explorer (Desktop) to be ready
-while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }
-
-# COPY MANUAL TOOLS TO DESKTOP NOW THAT PROFILE EXISTS
 Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force
 Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force
 
@@ -51,12 +47,7 @@ while ($true) {
     Set-Location $stateRepo
     git config user.name "RDP Sync Agent"
     git config user.email "agent@rdp.local"
-    git config --global core.safecrlf false
-    
-    Write-Log "Sync Cycle: Checking for remote updates..."
     git pull origin main --rebase 2>&1 | Out-Null
-    
-    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null
     
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
@@ -64,7 +55,6 @@ while ($true) {
     reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
     reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
     
-    # SMART CHANGE DETECTION: Only commit if Registry files changed
     git add Registry/*.reg
     $regStatus = git status --porcelain Registry/
     
@@ -75,8 +65,6 @@ while ($true) {
         git commit -m "$msg" 2>&1 | Out-Null
         git push origin main 2>&1
         Write-Log "Push Complete."
-    } else {
-        Write-Log "No setting changes detected. Skipping Push."
     }
     
     Start-Sleep -Seconds 300
