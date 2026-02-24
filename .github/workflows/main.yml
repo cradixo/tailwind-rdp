@@ -18,31 +18,17 @@ jobs:
           MY_PAT: ${{ secrets.GH_PAT }}
           NATIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Intelligent fallback: Use custom GH_PAT if it exists, otherwise fall back to native repo token.
           $token = $env:MY_PAT
-          if ([string]::IsNullOrWhiteSpace($token)) {
-              Write-Host "GH_PAT secret is empty or missing. Falling back to built-in GITHUB_TOKEN..."
-              $token = $env:NATIVE_TOKEN
-          }
-          
-          if ([string]::IsNullOrWhiteSpace($token)) {
-              Write-Error "CRITICAL FAILURE: Both GH_PAT and GITHUB_TOKEN are empty. Cannot authenticate to GitHub."
-              exit 1
-          }
+          if ([string]::IsNullOrWhiteSpace($token)) { $token = $env:NATIVE_TOKEN }
+          if ([string]::IsNullOrWhiteSpace($token)) { Write-Error "No Token Found"; exit 1 }
 
           $repoUrl = "https://x-access-token:$token@github.com/cradixo/tailwind-rdp.git"
-          Write-Host "Initiating Git Clone sequence..."
           git clone $repoUrl C:\state-repo
           
-          if (-not (Test-Path "C:\state-repo\.git")) {
-            Write-Error "Failed to clone state repository. Authentication was rejected."
-            exit 1
-          }
-          Write-Host "Repository cloned successfully."
-
-          # CRITICAL FIX: Grant explicit global read/write permissions to bypass UAC file restrictions
+          if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
+          
+          # Grant Full Access to Everyone to prevent Permission/UAC errors
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
-          Write-Host "NTFS Permissions elevated for repository path."
 
       - name: Configure Core RDP Settings
         run: |
@@ -58,10 +44,12 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Deploy High-Privilege Telemetry Agent
+      - name: Deploy Smart Telemetry Agent & Manual Tools
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
+          $desktopPath = "C:\Users\cardersparadox\Desktop"
           
+          # 1. THE MAIN BACKGROUND AGENT
           $syncScript = @(
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$stateRepo = ''C:\state-repo''',
@@ -78,93 +66,104 @@ jobs:
               '    Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8',
               '}',
               '',
-              '# Safety Guard: Ensure we are in the correct user context',
+              '# --- GUARD CLAUSE: KILL GHOST RUNS ---',
               'if ($env:USERNAME -ne "cardersparadox") {',
-              '    Write-Log "CRITICAL: Script started in wrong user context ($env:USERNAME). Aborting to prevent corruption."',
+              '    Write-Log "ABORT: Script launched by $env:USERNAME. Waiting for cardersparadox."',
               '    exit',
               '}',
               '',
-              '# Wait for Windows Explorer to fully load (DWM) before attempting restore',
-              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {',
-              '    Start-Sleep -Seconds 2',
-              '}',
+              '# Wait for Explorer (Desktop) to be ready',
+              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
               '',
-              '# Calculate the precise RDP SID',
               '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
               '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
               '',
-              'Write-Log "========================================"',
-              'Write-Log "Sync Agent Initialized. Mapped Target RDP SID: $sid"',
-              'Write-Log "========================================"',
+              'Write-Log "=== AGENT STARTED: $sid ==="',
               '',
+              '# --- ONE-TIME RESTORATION PHASE ---',
               'if (-not (Test-Path $restoredFlag)) {',
               '    if (Test-Path "$stateRepo\Registry") {',
-              '        Write-Log "*** RESTORATION SEQUENCE STARTED ***"',
-              '        Write-Log "Found existing Registry backups. Applying configurations..."',
+              '        Write-Log "Found backup. Restoring..."',
               '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
-              '            # Dynamically inject the correct SID into the text file',
-              '            $regContent = Get-Content $_.FullName',
-              '            $regContent = $regContent -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
-              '            $regContent | Out-File -FilePath $_.FullName -Encoding Unicode',
-              '            ',
-              '            $importResult = Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait -PassThru',
-              '            Write-Log "Imported $($_.Name) with exit code: $($importResult.ExitCode)"',
+              '            $content = Get-Content $_.FullName',
+              '            $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
+              '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
+              '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '        }',
-              '        Write-Log "Restarting Windows Explorer to instantly apply visual changes."',
               '        Stop-Process -Name explorer -Force',
-              '        Write-Log "*** RESTORATION COMPLETED SUCCESSFULLY ***"',
-              '    } else {',
-              '        Write-Log "No existing Registry folder found. Proceeding with fresh configuration."',
+              '        Write-Log "Restoration Complete."',
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
               '}',
               '',
+              '# --- CONTINUOUS BACKUP LOOP ---',
               'while ($true) {',
-              '    Write-Log "Initiating routine 1-minute sync and export cycle..."',
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
               '    git config --global core.safecrlf false',
               '    ',
-              '    # Pulled to the top to prevent dirty rebase warnings',
-              '    Write-Log "Pulling latest remote changes (rebase)..."',
-              '    $pullOutput = git pull origin main --rebase 2>&1',
-              '    Write-Log "Git Pull Output: $pullOutput"',
+              '    Write-Log "Sync Cycle: Checking for remote updates..."',
+              '    git pull origin main --rebase 2>&1 | Out-Null',
               '    ',
               '    New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null',
               '    ',
-              '    # Export strictly from the calculated mathematical SID',
+              '    # Export Registry',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
               '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
               '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
-              '    Write-Log "Native cross-profile registry keys exported successfully."',
               '    ',
-              '    $status = git status --porcelain',
-              '    if ($status) {',
-              '        Write-Log "Changes detected. Committing..."',
-              '        git add . ',
-              '        $commitMsg = "Auto-save Windows UI & Telemetry $(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')" ',
-              '        git commit -m "$commitMsg" 2>&1 | Out-Null',
-              '        ',
-              '        Write-Log "Pushing to GitHub..."',
-              '        $pushOutput = git push origin main 2>&1',
-              '        Write-Log "Git Push Output: $pushOutput"',
+              '    # SMART CHANGE DETECTION: Only commit if Registry files changed',
+              '    git add Registry/*.reg',
+              '    $regStatus = git status --porcelain Registry/',
+              '    ',
+              '    if ($regStatus) {',
+              '        Write-Log "SETTINGS CHANGED. Committing..."',
+              '        # Now we add the log file too, since the settings changed',
+              '        git add .',
+              '        $msg = "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')"',
+              '        git commit -m "$msg" 2>&1 | Out-Null',
+              '        git push origin main 2>&1',
+              '        Write-Log "Push Complete."',
+              '    } else {',
+              '        Write-Log "No setting changes detected. Skipping Push."',
               '    }',
               '    ',
-              '    Write-Log "Cycle complete. Sleeping for 1 minute before next sync..."',
-              '    Start-Sleep -Seconds 60',
+              '    Start-Sleep -Seconds 300',
               '}'
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
+
+          # 2. CREATE MANUAL "FORCE BACKUP" SCRIPT ON DESKTOP
+          $backupScript = @(
+              'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
+              'Set-Location "C:\state-repo"',
+              'git add .',
+              'git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
+              'git push origin main',
+              'Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
+              'Pause'
+          )
+          $backupScript | Out-File -FilePath "$desktopPath\Force-Backup.ps1" -Encoding UTF8
+
+          # 3. CREATE MANUAL "FORCE RESTORE" SCRIPT ON DESKTOP
+          $restoreScript = @(
+              'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
+              'Stop-Process -Name "powershell" -Force -ErrorAction SilentlyContinue # Kill background agent temporarily',
+              'Start-Process -FilePath "powershell.exe" -ArgumentList "-File C:\state-repo\StateSync.ps1" -Verb RunAs',
+              'Write-Host "Restore Triggered. Explorer will restart shortly." -ForegroundColor Cyan',
+              'Pause'
+          )
+          $restoreScript | Out-File -FilePath "$desktopPath\Force-Restore.ps1" -Encoding UTF8
           
-          # CRITICAL FIX: Register Task strictly for the 'cardersparadox' identity to kill Ghost Runs
+          # REGISTER TASK (Strictly bound to cardersparadox credentials to prevent Ghost Runs)
           $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
           $trigger = New-ScheduledTaskTrigger -AtLogOn -User "cardersparadox"
           $password = "Carding.Git!2024"
           Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -RunLevel Highest -User "cardersparadox" -Password $password -Force | Out-Null
-          Write-Host "Elevated telemetry agent successfully registered for user: cardersparadox"
+          Write-Host "Smart Agent Registered."
 
       - name: Install and Connect Tailscale
         run: |
@@ -188,31 +187,24 @@ jobs:
           Write-Host "Username: cardersparadox"
           Write-Host "Password: Carding.Git!2024"
           Write-Host "============================================"
-          Write-Host "Connecting via RDP will INSTANTLY launch the invisible Sync & Logging Agent."
-          Write-Host "Check the console below for LIVE telemetry streaming directly from your RDP session..."
+          Write-Host "Connecting via RDP will launch the Smart Sync Agent."
+          Write-Host "Live logs will appear below ONLY after you log in."
           Write-Host "-----------------------------------------------------------------------------------"
           
           $logFile = "C:\state-repo\Logs\SyncAgent.log"
           $endTime = (Get-Date).AddMinutes(350)
           $lastPosition = 0
           
-          # Dynamic Non-Blocking File Stream Reader
           while ((Get-Date) -lt $endTime) {
               if (Test-Path $logFile) {
                   $file = Get-Item $logFile
                   if ($file.Length -gt $lastPosition) {
-                      # Open with ReadWrite share to completely avoid locking out the background agent
                       $fs = [System.IO.FileStream]::new($logFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
                       $fs.Seek($lastPosition, [System.IO.SeekOrigin]::Begin) | Out-Null
                       $reader = [System.IO.StreamReader]::new($fs)
-                      
-                      while (-not $reader.EndOfStream) {
-                          Write-Host $reader.ReadLine()
-                      }
-                      
+                      while (-not $reader.EndOfStream) { Write-Host $reader.ReadLine() }
                       $lastPosition = $fs.Position
-                      $reader.Close()
-                      $fs.Close()
+                      $reader.Close(); $fs.Close()
                   }
               }
               Start-Sleep -Seconds 5
@@ -222,53 +214,38 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Write-Host "================ EMERGENCY TEARDOWN ================"
-          Write-Host "Job concluded or was manually cancelled. Performing emergency background backup..."
+          Write-Host "=== EMERGENCY TEARDOWN ==="
           $stateRepo = 'C:\state-repo'
-          
-          if (-not (Test-Path $stateRepo)) {
-              Write-Host "State repository was never cloned. Skipping emergency backup."
-              exit 0
-          }
+          if (-not (Test-Path $stateRepo)) { exit 0 }
           
           try {
               $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
               
               if (Test-Path "Registry::HKEY_USERS\$sid") {
-                  Write-Host "Target user hive (SID: $sid) is actively loaded. Exporting final state..."
-                  New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null
-                  
+                  Write-Host "Saving final state for SID: $sid"
                   Set-Location $stateRepo
-                  git config user.name "Emergency Sync Agent"
+                  git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
-                  git config --global core.safecrlf false
                   
-                  # Git pull executes BEFORE export to eliminate rebase warnings
-                  git pull origin main --rebase
+                  git pull origin main --rebase 2>&1 | Out-Null
                   
+                  # Export
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
                   reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
                   
-                  Write-Host "Registry successfully extracted cross-profile."
-                  
-                  git add .
-                  $status = git status --porcelain
-                  if ($status) {
-                      $commitMsg = "Emergency Auto-save Windows UI $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-                      git commit -m "$commitMsg"
-                      git push origin main
-                      Write-Host "Emergency backup successfully pushed to GitHub."
+                  # Smart Commit (Only if settings changed)
+                  git add Registry/*.reg
+                  if (git status --porcelain Registry/) {
+                      git add .
+                      git commit -m "Emergency Save" 2>&1 | Out-Null
+                      git push origin main 2>&1
+                      Write-Host "Emergency Backup Success."
                   } else {
-                      Write-Host "No registry changes detected during emergency scan. Repository is up-to-date."
+                      Write-Host "No changes detected."
                   }
-              } else {
-                  Write-Host "User hive not loaded. User likely logged out manually before cancellation."
               }
-          } catch {
-              Write-Host "Error calculating SID: $($_.Exception.Message)"
-          }
-          Write-Host "===================================================="
+          } catch { Write-Host "Error: $($_.Exception.Message)" }
