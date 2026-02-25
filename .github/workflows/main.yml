@@ -75,13 +75,13 @@ jobs:
 
       - name: Configure Remote Desktop Services & UI Policies
         run: |
-          # 1. DEFENDER BYPASS: Use ExclusionPath instead of Disable (Bypasses Tamper Protection)
+          # 1. DEFENDER BYPASS: Whitelist C:\ to stop CPU usage without triggering "Tamper Protection" blocks
           Write-Host "Optimizing CPU: Whitelisting entire C:\ drive to neutralize Defender Real-time Scan..."
           Add-MpPreference -ExclusionPath "C:\" -Force -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionProcess "git.exe" -Force -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionProcess "powershell.exe" -Force -ErrorAction SilentlyContinue
           
-          # 2. DEBLOAT: Target 'Public' AND 'Default' desktops to prevent User Profile inheritance of bloat
+          # 2. DEBLOAT: Clean both Public and Default desktop templates to stop Unity/R from spawning for new users
           Write-Host "Nuking Developer Bloat from Core Desktop Templates..."
           $desktopPaths = @("C:\Users\Public\Desktop", "C:\Users\Default\Desktop")
           foreach ($path in $desktopPaths) {
@@ -156,14 +156,6 @@ jobs:
               '    "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
               '}'
           )
-          
-          # Apply "Adjust for best performance" to User Hive to reduce RDP visual latency
-          $targetUser = "${{ env.RDP_USER }}"
-          $User = New-Object System.Security.Principal.NTAccount($targetUser)
-          $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
-          $fxPath = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-          if (-not (Test-Path $fxPath)) { New-Item -Path $fxPath -Force | Out-Null }
-          Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
           
           $elevationCheck = @(
             '# --- SELF-ELEVATION GUARD ---',
@@ -260,8 +252,13 @@ jobs:
               'Write-Log "=== DAEMON INITIALIZED: $sid ==="',
               '$restoredFlag = "$env:TEMP\registry_restored.flag"',
               '',
+              '# PERFORMANCE: Disable Visual FX inside the active user session (Corrected Logic)',
+              '$fxPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"',
+              'if (-not (Test-Path $fxPath)) { New-Item -Path $fxPath -Force | Out-Null }',
+              'Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue',
+              '',
               'if (-not (Test-Path $restoredFlag)) {',
-              '    # DOUBLE-TAP: Clean desktop again upon user login to catch any stragglers',
+              '    # DOUBLE-TAP: Clean desktop again upon user login to catch any stragglers from Default Profile',
               '    Get-ChildItem -Path "$env:USERPROFILE\Desktop" -Filter "*.lnk" -Force | Where-Object { $_.Name -notmatch "Firefox|Chrome|Edge|Force|Toggle" } | Remove-Item -Force -ErrorAction SilentlyContinue',
               '    ',
               '    foreach ($folder in $SyncFolderMap.Keys) {',
