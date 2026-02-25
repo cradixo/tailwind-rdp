@@ -9,6 +9,7 @@ permissions:
 env:
   RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
+  SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'false' }}
 
 jobs:
   secure-rdp:
@@ -33,10 +34,12 @@ jobs:
           } else {
               Write-Host "Authenticating to Primary Database: $env:DB_USER/$env:DB_REPO"
               $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
-              git clone $repoUrl C:\state-repo 2>&1 | Out-Null
               
-              if (-not (Test-Path "C:\state-repo\.git")) {
-                  Write-Host "Error: Access to primary database denied or PAT expired. Routing to local repository..." -ForegroundColor Red
+              # FIXED: Using cmd.exe to suppress stderr and prevent NativeCommandError crashes
+              cmd.exe /c "git clone -q `"$repoUrl`" C:\state-repo 2>nul"
+              
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) {
+                  Write-Host "Error: Access to primary database denied or repository empty. Routing to fallback..." -ForegroundColor Red
                   $fallback = $true
               } else {
                   Write-Host "Primary database connection established." -ForegroundColor Green
@@ -46,8 +49,10 @@ jobs:
           if ($fallback) {
               if (Test-Path "C:\state-repo") { Remove-Item -Path "C:\state-repo" -Recurse -Force -ErrorAction SilentlyContinue }
               Write-Host "Cloning fallback state database: $env:LOCAL_REPO"
+              
               $localRepoUrl = "https://x-access-token:$($env:NATIVE_TOKEN)@github.com/$env:LOCAL_REPO.git"
-              git clone $localRepoUrl C:\state-repo 2>&1 | Out-Null
+              cmd.exe /c "git clone -q `"$localRepoUrl`" C:\state-repo 2>nul"
+              
               if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "CRITICAL: Fallback architecture failed."; exit 1 }
               Write-Host "Fallback database connection established." -ForegroundColor Green
           }
@@ -69,10 +74,6 @@ jobs:
       - name: Generate Centralized Configuration Schema (RdpConfig.ps1)
         shell: powershell
         run: |
-          # -------------------------------------------------------------------
-          # USER CONFIGURATION BLOCK
-          # Modify this generated file to change what gets backed up/restored.
-          # -------------------------------------------------------------------
           $configScript = @'
           $targetUser = '${{ env.RDP_USER }}'
           $userDir = "C:\Users\$targetUser"
@@ -83,26 +84,20 @@ jobs:
               $sid = $UserObj.Translate([System.Security.Principal.SecurityIdentifier]).value
           } catch { $sid = "UNKNOWN" }
           
-          # 1. REGISTRY KEYS TO SYNCHRONIZE
           $SyncRegistryMap = @{
               "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
               "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
               "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
               "DWM.reg"              = "Software\Microsoft\Windows\DWM"
               "Desktop.reg"          = "Control Panel\Desktop"
-              # Add custom registry paths here (e.g., "Browser.reg" = "Software\Google\Chrome")
           }
           
-          # 2. DIRECTORIES TO SYNCHRONIZE
           $SyncFolderMap = @{
               "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"
               "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"
-              # Add custom folders here (e.g., "Documents" = "$userDir\Documents")
           }
           '@
           $configScript | Out-File -FilePath "C:\state-repo\RdpConfig.ps1" -Encoding UTF8
-          
-          # Initialize the custom logon scripts directory
           if (-not (Test-Path "C:\state-repo\InitScripts")) { New-Item -Path "C:\state-repo\InitScripts" -ItemType Directory -Force | Out-Null }
 
       - name: Deploy State Synchronization Daemons & Client Tools
@@ -154,10 +149,7 @@ jobs:
                   $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")
                   if ($regKey) {
                       $themePath = $regKey.GetValue("CurrentTheme")
-                      if ($themePath -and (Test-Path $themePath)) {
-                          Start-Process -FilePath $themePath; Start-Sleep -Seconds 3
-                          Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue
-                      }
+                      if ($themePath -and (Test-Path $themePath)) { Start-Process -FilePath $themePath; Start-Sleep -Seconds 3; Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue }
                   }
               } catch {}
               Stop-Process -Name explorer -Force
@@ -184,17 +176,13 @@ jobs:
               foreach ($folder in $SyncFolderMap.Keys) { if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force } }
               if (Test-Path "$stateRepo\Registry") {
                   Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { 
-                      $content = Get-Content $_.FullName
-                      $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
+                      $content = Get-Content $_.FullName; $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
                       $content | Out-File -FilePath $_.FullName -Encoding Unicode
                       Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait
                   }
                   try {
                       $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")
-                      if ($regKey) {
-                          $themePath = $regKey.GetValue("CurrentTheme")
-                          if ($themePath -and (Test-Path $themePath)) { Start-Process -FilePath $themePath; Start-Sleep -Seconds 3; Stop-Process -Name "SystemSettings" -Force }
-                      }
+                      if ($regKey) { $themePath = $regKey.GetValue("CurrentTheme"); if ($themePath -and (Test-Path $themePath)) { Start-Process -FilePath $themePath; Start-Sleep -Seconds 3; Stop-Process -Name "SystemSettings" -Force } }
                   } catch {}
                   Stop-Process -Name explorer -Force
               }
@@ -227,7 +215,7 @@ jobs:
           '@
           $syncScript | Out-File -FilePath "C:\state-repo\StateSync.ps1" -Encoding UTF8
 
-          # 4. USER LOGON SCRIPT EXECUTOR (InitScripts)
+          # 4. USER LOGON SCRIPT EXECUTOR
           $logonScript = @'
           $initDir = "C:\state-repo\InitScripts"
           if (Test-Path $initDir) {
@@ -239,21 +227,78 @@ jobs:
           }
           '@
           $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
-          
-          # Place the execution hook directly into the user's Startup folder
           $startupFolder = "C:\Users\${{ env.RDP_USER }}\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
           New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
           $WshShell = New-Object -comObject WScript.Shell
           $Shortcut = $WshShell.CreateShortcut("$startupFolder\InitScriptsHook.lnk")
-          $Shortcut.TargetPath = "powershell.exe"
-          $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
-          $Shortcut.Save()
+          $Shortcut.TargetPath = "powershell.exe"; $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"; $Shortcut.Save()
 
-          # 5. REGISTER DAEMON
           $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"C:\state-repo\StateSync.ps1`""
           $trigger = New-ScheduledTaskTrigger -AtLogOn
           $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
           Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+
+      - name: Deploy Save-Runtime Idle Monitor (If Enabled)
+        shell: powershell
+        run: |
+          if ('${{ env.SAVE_RUNTIME }}' -eq 'true') {
+              Write-Host "Save-Runtime feature ENABLED. Deploying Idle Monitor Daemon..."
+              
+              $idleDaemon = @'
+              Add-Type @"
+              using System;
+              using System.Runtime.InteropServices;
+              public class IdleTime {
+                  [StructLayout(LayoutKind.Sequential)]
+                  struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+                  [DllImport("user32.dll")]
+                  static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+                  public static uint GetIdle() {
+                      LASTINPUTINFO info = new LASTINPUTINFO();
+                      info.cbSize = (uint)Marshal.SizeOf(info);
+                      GetLastInputInfo(ref info);
+                      return (uint)Environment.TickCount - info.dwTime;
+                  }
+              }
+              "@
+              
+              $idleTimeoutMs = 15 * 60 * 1000 # 15 minutes
+              while($true) {
+                  Start-Sleep -Seconds 10
+                  if (Test-Path "C:\state-repo\idle_disabled.flag") { continue }
+                  
+                  $idle = [IdleTime]::GetIdle()
+                  if ($idle -gt $idleTimeoutMs) {
+                      $wsh = New-Object -ComObject WScript.Shell
+                      # 4096 = Topmost System Modal, 48 = Exclamation Icon
+                      $btn = $wsh.Popup("No activity detected for 15 minutes. Workflow will cancel in 60 seconds to save minutes.`n`nClick OK to stay connected.", 60, "Idle Timeout", 1 + 48 + 4096)
+                      
+                      if ($btn -eq -1) {
+                          # Timeout reached. Signal the workflow to gracefully shut down.
+                          New-Item -Path "C:\state-repo\end_run.flag" -ItemType File -Force | Out-Null
+                          exit
+                      }
+                  }
+              }
+              '@
+              $idleDaemon | Out-File "C:\state-repo\SaveRuntimeDaemon.ps1" -Encoding UTF8
+              
+              $action2 = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"C:\state-repo\SaveRuntimeDaemon.ps1`""
+              Register-ScheduledTask -TaskName "RDPIdleMonitor" -Action $action2 -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal (New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest) -Force | Out-Null
+              
+              $toggleScript = @'
+              $flag = "C:\state-repo\idle_disabled.flag"
+              $wshell = New-Object -ComObject Wscript.Shell
+              if (Test-Path $flag) {
+                  Remove-Item $flag -Force
+                  $wshell.Popup("Auto-Shutdown is now ENABLED for this session.", 4, "Save Runtime", 64)
+              } else {
+                  New-Item $flag -ItemType File -Force | Out-Null
+                  $wshell.Popup("Auto-Shutdown is now DISABLED for this session.", 4, "Save Runtime", 48)
+              }
+              '@
+              $toggleScript | Out-File "C:\Users\${{ env.RDP_USER }}\Desktop\Toggle-AutoShutdown.ps1" -Encoding UTF8
+          } else { Write-Host "Save-Runtime feature disabled via secret." }
 
       - name: Establish Tailscale VPN Mesh & Resolve Orphaned Nodes
         shell: powershell
@@ -272,13 +317,8 @@ jobs:
                   $devicesUrl = "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices"
                   $response = Invoke-RestMethod -Uri $devicesUrl -Headers $headers -Method Get
                   $strayDevices = $response.devices | Where-Object { $_.hostname -eq $hostname }
-                  
-                  if ($strayDevices) {
-                      foreach ($dev in $strayDevices) {
-                          Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($dev.id)" -Headers $headers -Method Delete
-                          Write-Host "Orphaned node $($dev.id) successfully terminated."
-                      }
-                  } else { Write-Host "VPN Mesh routing is clean." }
+                  if ($strayDevices) { foreach ($dev in $strayDevices) { Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($dev.id)" -Headers $headers -Method Delete; Write-Host "Orphaned node $($dev.id) successfully terminated." } } 
+                  else { Write-Host "VPN Mesh routing is clean." }
               } catch { Write-Host "Warning: Tailscale API resolution failed. Continuing..." -ForegroundColor Yellow }
           }
           
@@ -287,9 +327,7 @@ jobs:
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="$hostname"
           
           $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim(); Start-Sleep -Seconds 5; $retries++
-          }
+          while (-not $tsIP -and $retries -lt 12) { $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim(); Start-Sleep -Seconds 5; $retries++ }
           if (-not $tsIP) { Write-Error "Tailscale routing failed."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
@@ -305,7 +343,14 @@ jobs:
           
           $logFile = "C:\state-repo\Logs\SyncDaemon.log"
           $endTime = (Get-Date).AddMinutes(350); $lastPosition = 0
+          
           while ((Get-Date) -lt $endTime) {
+              # Check if the Idle Monitor tripped the cancellation flag
+              if (Test-Path "C:\state-repo\end_run.flag") {
+                  Write-Host "`n[ALERT] User Idle Timeout Reached! Breaking session loop to save runner minutes..." -ForegroundColor Yellow
+                  break
+              }
+              
               if (Test-Path $logFile) {
                   $file = Get-Item $logFile
                   if ($file.Length -gt $lastPosition) {
@@ -328,6 +373,7 @@ jobs:
           if (-not (Test-Path $stateRepo)) { exit 0 }
           
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
+          Unregister-ScheduledTask -TaskName "RDPIdleMonitor" -Confirm:$false -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           if (Test-Path "$stateRepo\.git\index.lock") { Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue }
 
