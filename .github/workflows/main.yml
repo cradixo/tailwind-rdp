@@ -1,4 +1,4 @@
-name: RDP-Inter-Persistent-Final
+name: RDP-Static-Persistent-Final
 
 on:
   workflow_dispatch:
@@ -35,11 +35,9 @@ jobs:
               Write-Host "Authenticating to Primary Database: $env:DB_USER/$env:DB_REPO"
               $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
               
-              # Using cmd.exe to suppress PowerShell NativeCommandError wrap, while retaining text output via 2>&1 internally
               $cloneOutput = cmd.exe /c "git clone -q `"$repoUrl`" C:\state-repo 2>&1"
               
               if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) {
-                  # Sanitize Personal Access Token from diagnostic output to prevent log leaks
                   if (-not [string]::IsNullOrWhiteSpace($env:DB_PAT)) {
                       $cloneOutput = $cloneOutput -replace [regex]::Escape($env:DB_PAT), "***"
                   }
@@ -120,41 +118,57 @@ jobs:
             '}'
           )
           
-          # 1. MANUAL BACKUP SCRIPT
+          # 1. MANUAL BACKUP SCRIPT (Reverted strictly to Original Layout)
           $backupScript = $elevationCheck + $DataMaps + @(
               'Write-Host "Forcing Manual Backup to Remote Database..." -ForegroundColor Green',
               'Set-Location $stateRepo',
+              '',
               'if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
               'if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
               '',
-              'foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }',
+              'Write-Host "Exporting dynamic registry mapping..."',
+              'foreach ($key in $SyncRegistryMap.Keys) {',
+              '    reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null',
+              '}',
+              '',
+              'Write-Host "Backing up dynamic directory mapping..."',
               'foreach ($folder in $SyncFolderMap.Keys) {',
               '    $dest = "$stateRepo\Files\$folder"',
               '    if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
               '    Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '}',
               '',
+              'Write-Host "Committing and Pushing to Database (GitHub)..."',
               'git add Registry/*.reg',
               'git add Files/*',
               'if (git status --porcelain) {',
               '    git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
               '    git push origin main',
-              '    Write-Host "State transmission successful." -ForegroundColor Cyan',
-              '} else { Write-Host "No deltas detected." -ForegroundColor Yellow }',
+              '    Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
+              '} else {',
+              '    Write-Host "No changes detected. Backup skipped." -ForegroundColor Yellow',
+              '}',
               'Start-Sleep -Seconds 5'
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # 2. MANUAL RESTORE SCRIPT
+          # 2. MANUAL RESTORE SCRIPT (Reverted to Original Layout + Flicker Bypass)
           $restoreScript = $elevationCheck + $DataMaps + @(
               'Write-Host "Forcing Manual Restore from Database..." -ForegroundColor Yellow',
               'Set-Location $stateRepo',
+              '',
+              'Write-Host "Pulling latest state from Database (GitHub)..."',
               'git reset --hard HEAD',
               'git pull origin main --rebase',
               '',
+              'Write-Host "Restoring physical assets..."',
               'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
+              '    if (Test-Path "$stateRepo\Files\$folder") {',
+              '        Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue',
+              '    }',
               '}',
+              '',
+              'Write-Host "Applying registry map..."',
               'if (Test-Path "$stateRepo\Registry") {',
               '    Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
               '        $content = Get-Content $_.FullName',
@@ -162,15 +176,27 @@ jobs:
               '        $content | Out-File -FilePath $_.FullName -Encoding Unicode',
               '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '    }',
+              '    ',
+              '    Write-Host "Invoking Desktop Window Manager (Theme Engine)..."',
               '    try {',
               '        $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
               '        if ($regKey) {',
               '            $themePath = $regKey.GetValue("CurrentTheme")',
-              '            if ($themePath -and (Test-Path $themePath)) { Start-Process -FilePath $themePath; Start-Sleep -Seconds 3; Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue }',
+              '            if ($themePath -and (Test-Path $themePath)) {',
+              '                # DISABLED: Executing .theme natively forces Windows to transition through the Default (D) theme.',
+              '                # Start-Process -FilePath $themePath',
+              '                # Start-Sleep -Seconds 3',
+              '                # Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue',
+              '                Write-Host "Bypassed native Settings payload to prevent DWM flicker." -ForegroundColor Gray',
+              '            }',
               '        }',
-              '    } catch {}',
+              '    } catch { Write-Host "Failed to invoke theme automatically." }',
+              '    ',
+              '    Write-Host "Restarting Explorer to finalize UI elements..."',
               '    Stop-Process -Name explorer -Force',
-              '    Write-Host "Restoration complete." -ForegroundColor Cyan',
+              '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
+              '} else {',
+              '    Write-Host "No registry backup found in repository!" -ForegroundColor Red',
               '}',
               'Start-Sleep -Seconds 5'
           )
@@ -205,8 +231,15 @@ jobs:
               '        }',
               '        try {',
               '            $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
-              '            if ($regKey) { $themePath = $regKey.GetValue("CurrentTheme"); if ($themePath -and (Test-Path $themePath)) { Start-Process -FilePath $themePath; Start-Sleep -Seconds 3; Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue } }',
-              '        } catch {}',
+              '            if ($regKey) {',
+              '                $themePath = $regKey.GetValue("CurrentTheme")',
+              '                if ($themePath -and (Test-Path $themePath)) {',
+              '                    # Start-Process -FilePath $themePath',
+              '                    # Start-Sleep -Seconds 3',
+              '                    # Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue',
+              '                }',
+              '            }',
+              '        } catch { Write-Log "Theme invoke failed." }',
               '        Stop-Process -Name explorer -Force',
               '        Write-Log "Restoration Complete."',
               '    }',
@@ -255,7 +288,6 @@ jobs:
           $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
           if (-not (Test-Path "C:\state-repo\InitScripts")) { New-Item -Path "C:\state-repo\InitScripts" -ItemType Directory -Force | Out-Null }
           
-          # Injecting natively into ALL USERS Startup directory safely bypasses all profile anomaly behaviors
           $startupFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
           if (-not (Test-Path $startupFolder)) { New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
           $WshShell = New-Object -comObject WScript.Shell
@@ -402,60 +434,4 @@ jobs:
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "RDPIdleMonitor" -Confirm:$false -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
-          if (Test-Path "$stateRepo\.git\index.lock") { Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue }
-
-          try {
-              $targetUser = "${{ env.RDP_USER }}"
-              $User = New-Object System.Security.Principal.NTAccount($targetUser)
-              $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
-              
-              if (Test-Path "Registry::HKEY_USERS\$sid") {
-                  Write-Host "Saving final state for SID: $sid"
-                  Set-Location $stateRepo
-                  git config user.name "Emergency Agent"
-                  git config user.email "agent@rdp.local"
-                  
-                  # Hard Lookup profile mappings to guarantee target integrity against runner limits
-                  $profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath
-                  if ([string]::IsNullOrWhiteSpace($profilePath)) { $profilePath = "C:\Users\$targetUser" }
-                  
-                  $SyncRegistryMap = @{
-                      "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
-                      "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-                      "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
-                      "DWM.reg"              = "Software\Microsoft\Windows\DWM"
-                      "Desktop.reg"          = "Control Panel\Desktop"
-                  }
-                  $SyncFolderMap = @{
-                      "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"
-                      "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"
-                  }
-                  
-                  if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }
-                  if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }
-                  
-                  foreach ($key in $SyncRegistryMap.Keys) {
-                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null
-                  }
-                  foreach ($folder in $SyncFolderMap.Keys) {
-                      $dest = "$stateRepo\Files\$folder"
-                      if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
-                      Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
-                  }
-
-                  git add Registry/*.reg
-                  git add Files/*
-                  
-                  if (git status --porcelain) {
-                      Write-Host "Changes detected, committing locally..."
-                      git commit -m "Emergency Save (VM Shutdown) $(Get-Date -Format 'HH:mm:ss')" --quiet
-                  } else { Write-Host "No local changes detected." }
-                  
-                  Write-Host "Synchronizing with Database (Remote Repository)..."
-                  git pull origin main --rebase --quiet
-                  git push origin main --quiet
-                  
-                  if ($LASTEXITCODE -eq 0) { Write-Host "Volatile state synchronized successfully." } 
-                  else { Write-Host "Warning: Remote synchronization failed (Code $LASTEXITCODE)." }
-              }
-          } catch { Write-Host "Teardown Exception: $($_.Exception.Message)" }
+          if (Test-Path "$stateRepo\.git\index.lock") {
