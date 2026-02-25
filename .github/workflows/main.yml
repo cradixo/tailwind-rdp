@@ -21,12 +21,9 @@ jobs:
           $token = $env:MY_PAT
           if ([string]::IsNullOrWhiteSpace($token)) { $token = $env:NATIVE_TOKEN }
           if ([string]::IsNullOrWhiteSpace($token)) { Write-Error "No Token Found"; exit 1 }
-
           $repoUrl = "https://x-access-token:$token@github.com/cradixo/tailwind-rdp.git"
           git clone $repoUrl C:\state-repo
-          
           if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
-          
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -47,8 +44,7 @@ jobs:
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # 1. CREATE ROBUST MANUAL TOOLS IN REPO FOLDER
-          # This backup script is now self-contained and exports a fresh snapshot first.
+          # 1. CREATE ROBUST, ATOMIC MANUAL TOOLS
           $backupScript = @(
               '$stateRepo = ''C:\state-repo''',
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
@@ -70,14 +66,15 @@ jobs:
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # This restore script is now self-contained and performs the full logic.
           $restoreScript = @(
               '$stateRepo = ''C:\state-repo''',
               'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
               'Set-Location $stateRepo',
               'Write-Host "Pulling latest settings from GitHub..."',
+              '# CRITICAL: Reset any local changes and pull the official state from the repo',
               'git reset --hard HEAD',
               'git pull origin main --rebase',
+              '',
               '$User = New-Object System.Security.Principal.NTAccount("cardersparadox")',
               '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
               'Write-Host "Applying settings for SID: $sid..."',
@@ -160,7 +157,6 @@ jobs:
           $trigger = New-ScheduledTaskTrigger -AtLogOn
           $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
           Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-
           if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
           Write-Host "Bulletproof Agent Registered."
 
@@ -169,7 +165,6 @@ jobs:
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
-          
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
@@ -186,14 +181,11 @@ jobs:
           Write-Host "Username: cardersparadox"
           Write-Host "Password: Carding.Git!2024"
           Write-Host "============================================"
-          Write-Host "Connecting via RDP will launch the Smart Sync Agent."
           Write-Host "Live logs will appear below ONLY after you log in."
           Write-Host "-----------------------------------------------------------------------------------"
-          
           $logFile = "C:\state-repo\Logs\SyncAgent.log"
           $endTime = (Get-Date).AddMinutes(350)
           $lastPosition = 0
-          
           while ((Get-Date) -lt $endTime) {
               if (Test-Path $logFile) {
                   $file = Get-Item $logFile
@@ -216,35 +208,27 @@ jobs:
           Write-Host "=== EMERGENCY TEARDOWN ==="
           $stateRepo = 'C:\state-repo'
           if (-not (Test-Path $stateRepo)) { exit 0 }
-          
           try {
               $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
-              
               if (Test-Path "Registry::HKEY_USERS\$sid") {
                   Write-Host "Saving final state for SID: $sid"
                   Set-Location $stateRepo
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
-                  
-                  # CRITICAL FIX: Reset local changes to guarantee pull succeeds
                   git reset --hard HEAD
                   git pull origin main --rebase 2>&1 | Out-Null
-                  
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
                   reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
-                  
                   git add Registry/*.reg
                   if (git status --porcelain Registry/) {
                       git add .
                       git commit -m "Emergency Save" 2>&1 | Out-Null
                       git push origin main 2>&1
                       Write-Host "Emergency Backup Success."
-                  } else {
-                      Write-Host "No changes detected."
-                  }
+                  } else { Write-Host "No changes detected." }
               }
           } catch { Write-Host "Error: $($_.Exception.Message)" }
