@@ -137,6 +137,9 @@ jobs:
           if (-not (Test-Path $gitignorePath)) {
               "*.ps1`n*.flag`n*.log`nLogs/`n.gitignore" | Out-File -FilePath $gitignorePath -Encoding UTF8
           }
+          
+          # Ensure directory exists before writing any InitScripts
+          if (-not (Test-Path "C:\state-repo\InitScripts")) { New-Item -Path "C:\state-repo\InitScripts" -ItemType Directory -Force | Out-Null }
 
           $agentPath = "C:\state-repo\StateSync.ps1"
           
@@ -317,45 +320,41 @@ jobs:
               'Write-Host "--- INITIATING HYPER-OPTIMIZATION (8GB RAM TARGET) ---" -ForegroundColor Cyan',
               '$ErrorActionPreference = "SilentlyContinue"',
               '',
-              '# A. SUBDUE SYSTEM BLOAT (DISK/CPU)',
+              '# A. SYNC WITH LOGON & STATE RESTORE',
+              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
+              'Start-Sleep -Seconds 5 # Give restoration a head start',
+              '',
+              '# B. SUBDUE SYSTEM BLOAT (DISK/CPU)',
               '$bloatServices = @("WSearch", "SysMain", "UsoSvc", "DiagTrack", "FabricHostSvc", "LanmanWorkstation")',
               'foreach ($svc in $bloatServices) {',
-              '    Write-Host "Neutralizing $svc..."',
+              '    Write-Host "Stopping $svc..."',
               '    Stop-Service -Name $svc -Force',
               '    Set-Service -Name $svc -StartupType Disabled',
-              '    # Fallback: Force Registry Disable',
-              '    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "Start" -Value 4 -Force',
               '}',
               '',
-              '# B. SCREENSHOT TARGETS & FALLBACKS',
-              'Write-Host "Targeting Screenshot Bloat..."',
-              '$targets = @("ServiceFabricLocalClusterManager", "SearchHost", "CompatTelRunner", "CompatTel")',
-              'foreach ($t in $targets) { Stop-Process -Name $t -Force; taskkill /F /IM "$t.exe" /T }',
-              '',
-              '# C. DISK THRASHING FALLBACK (Nuke Update Cache if pinning disk)',
-              'if ((Get-Counter "\LogicalDisk(C:)\% Disk Time").CounterSamples.CookedValue -gt 90) {',
-              '    Write-Host "High Disk Activity Detected. Clearing SoftwareDistribution fallback..."',
-              '    Stop-Service -Name "wuauserv" -Force',
-              '    Remove-Item -Path "C:\Windows\SoftwareDistribution\*" -Recurse -Force',
+              '# C. SPECIFIC BLOAT TARGETS (FROM SCREENSHOT)',
+              'Write-Host "Cleaning background clutter..."',
+              '$targets = @("ServiceFabricLocalClusterManager", "SearchHost", "CompatTelRunner", "CompatTel", "RuntimeBroker")',
+              'foreach ($t in $targets) { ',
+              '    Stop-Process -Name $t -Force ',
               '}',
               '',
-              '# D. MEMORY TRIMMER & PRIORITY MANAGEMENT',
-              'Write-Host "Optimizing Memory & Process Priorities..."',
+              '# D. PERFORMANCE ENFORCEMENT (Memory Trimming & Priority)',
+              'Write-Host "Optimizing Memory & Process Fairness..."',
               'Get-Process | ForEach-Object {',
               '    try {',
               '        if ($_.Name -eq "explorer") { $_.PriorityClass = "High" }',
               '        elseif ($_.Name -match "msmpeng|git|StateSync|powershell") { ',
               '            $_.PriorityClass = "BelowNormal"',
-              '            # Pin heavy processes to Core 0 to leave Core 1 free for GUI',
-              '            $_.ProcessorAffinity = 1 ',
+              '            $_.ProcessorAffinity = 1 # Pin to secondary core',
               '        }',
-              '        # Periodic Working Set Trimming',
+              '        # Aggressive Working Set Trimming',
               '        $_.MinWorkingSet = [IntPtr]::Zero',
               '        $_.MaxWorkingSet = [IntPtr]::Zero',
               '    } catch {}',
               '}',
               '',
-              'Write-Host "Hyper-Optimization Complete. System resources released." -ForegroundColor Green'
+              'Write-Host "SUCCESSS: System optimized for RDP." -ForegroundColor Green'
           )
           $optScript | Out-File -FilePath "C:\state-repo\InitScripts\01-HyperOptimize.ps1" -Encoding UTF8
 
@@ -373,7 +372,6 @@ jobs:
               '}'
           )
           $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
-          if (-not (Test-Path "C:\state-repo\InitScripts")) { New-Item -Path "C:\state-repo\InitScripts" -ItemType Directory -Force | Out-Null }
           
           $startupFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
           if (-not (Test-Path $startupFolder)) { New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
