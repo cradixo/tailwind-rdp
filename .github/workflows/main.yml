@@ -159,7 +159,12 @@ jobs:
           '@
           $restoreScript | Out-File -FilePath "C:\state-repo\Force-Restore.ps1" -Encoding UTF8
 
-          # 3. BACKGROUND TELEMETRY DAEMON
+          # 3. IMMEDIATE DEPLOY TO PUBLIC DESKTOP (PRE-LOGON)
+          $publicDesktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
+          Copy-Item "C:\state-repo\Force-Backup.ps1" "$publicDesktop\Force-Backup.ps1" -Force
+          Copy-Item "C:\state-repo\Force-Restore.ps1" "$publicDesktop\Force-Restore.ps1" -Force
+
+          # 4. BACKGROUND TELEMETRY DAEMON
           $syncScript = ". C:\state-repo\RdpConfig.ps1`n" + @'
           if ($env:USERNAME -ne $targetUser) { exit }
           $ErrorActionPreference = 'SilentlyContinue'
@@ -169,10 +174,14 @@ jobs:
           # Wait for Desktop to exist (User Logon)
           while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
           
-          # Deploy Client Tools to Desktop
-          Copy-Item "C:\state-repo\Force-Backup.ps1" "$userDir\Desktop\Force-Backup.ps1" -Force
-          Copy-Item "C:\state-repo\Force-Restore.ps1" "$userDir\Desktop\Force-Restore.ps1" -Force
-          if (Test-Path "C:\state-repo\Toggle-AutoShutdown.ps1") { Copy-Item "C:\state-repo\Toggle-AutoShutdown.ps1" "$userDir\Desktop\Toggle-AutoShutdown.ps1" -Force }
+          # Deploy Client Tools to Public Desktop (Persistence Check)
+          $publicDesktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
+          $tools = @("Force-Backup.ps1", "Force-Restore.ps1", "Toggle-AutoShutdown.ps1")
+          foreach ($tool in $tools) {
+              if (Test-Path "C:\state-repo\$tool") {
+                  Copy-Item "C:\state-repo\$tool" "$publicDesktop\$tool" -Force
+              }
+          }
           
           Write-Log "Daemon Initialized for SID: $sid"
           $restoredFlag = "$env:TEMP\registry_restored.flag"
@@ -219,7 +228,7 @@ jobs:
           '@
           $syncScript | Out-File -FilePath "C:\state-repo\StateSync.ps1" -Encoding UTF8
 
-          # 4. USER LOGON SCRIPT EXECUTOR
+          # 5. USER LOGON SCRIPT EXECUTOR
           $logonScript = @'
           $initDir = "C:\state-repo\InitScripts"
           if (Test-Path $initDir) {
@@ -300,6 +309,10 @@ jobs:
               }
           '@
               $toggleScript | Out-File "C:\state-repo\Toggle-AutoShutdown.ps1" -Encoding UTF8
+              
+              # FIXED: IMMEDIATE COPY TO PUBLIC DESKTOP
+              $publicDesktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
+              Copy-Item "C:\state-repo\Toggle-AutoShutdown.ps1" "$publicDesktop\Toggle-AutoShutdown.ps1" -Force
           } else { Write-Host "Save-Runtime feature disabled via secret." }
 
       - name: Establish Tailscale VPN Mesh & Resolve Orphaned Nodes
