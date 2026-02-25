@@ -35,10 +35,15 @@ jobs:
               Write-Host "Authenticating to Primary Database: $env:DB_USER/$env:DB_REPO"
               $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
               
-              # Capture output to prevent runner from crashing on standard git auth errors
-              $cloneOutput = git clone $repoUrl C:\state-repo 2>&1
+              # Using cmd.exe to suppress PowerShell NativeCommandError wrap, while retaining text output via 2>&1 internally
+              $cloneOutput = cmd.exe /c "git clone -q `"$repoUrl`" C:\state-repo 2>&1"
               
-              if (-not (Test-Path "C:\state-repo\.git")) {
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) {
+                  # Sanitize Personal Access Token from diagnostic output to prevent log leaks
+                  if (-not [string]::IsNullOrWhiteSpace($env:DB_PAT)) {
+                      $cloneOutput = $cloneOutput -replace [regex]::Escape($env:DB_PAT), "***"
+                  }
+                  Write-Host "Git Diagnostic Output: $cloneOutput" -ForegroundColor Yellow
                   Write-Host "Error: Access to primary database denied or repository empty. Routing to fallback..." -ForegroundColor Red
                   $fallback = $true
               } else {
@@ -51,9 +56,16 @@ jobs:
               Write-Host "Cloning fallback state database: $env:LOCAL_REPO"
               
               $localRepoUrl = "https://x-access-token:$($env:NATIVE_TOKEN)@github.com/$env:LOCAL_REPO.git"
-              git clone $localRepoUrl C:\state-repo 2>&1 | Out-Null
+              $localCloneOutput = cmd.exe /c "git clone -q `"$localRepoUrl`" C:\state-repo 2>&1"
               
-              if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "CRITICAL: Fallback architecture failed."; exit 1 }
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) { 
+                  if (-not [string]::IsNullOrWhiteSpace($env:NATIVE_TOKEN)) {
+                      $localCloneOutput = $localCloneOutput -replace [regex]::Escape($env:NATIVE_TOKEN), "***"
+                  }
+                  Write-Host "Git Diagnostic Output: $localCloneOutput" -ForegroundColor Red
+                  Write-Error "CRITICAL: Fallback architecture failed."
+                  exit 1 
+              }
               Write-Host "Fallback database connection established." -ForegroundColor Green
           }
           
