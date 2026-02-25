@@ -11,7 +11,7 @@ env:
   RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
   SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'false' }}
-  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '15' }}
+  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '3' }}
 
 jobs:
   secure-rdp:
