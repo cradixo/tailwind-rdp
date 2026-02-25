@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Clone Persistent Database Repository (Cross-Account & Fallback)
+      - name: Initialize Distributed State Repository (Primary/Fallback Routing)
         shell: powershell
         env:
           DB_PAT: ${{ secrets.BACKUP_DB_PAT }}
@@ -27,255 +27,235 @@ jobs:
         run: |
           $fallback = $false
           
-          # 1. Validate External Secrets
           if ([string]::IsNullOrWhiteSpace($env:DB_PAT) -or [string]::IsNullOrWhiteSpace($env:DB_USER) -or [string]::IsNullOrWhiteSpace($env:DB_REPO)) {
-              Write-Host "Warning: External database secrets are missing. Initiating fallback to local repository..." -ForegroundColor Yellow
+              Write-Host "Warning: External database secrets missing. Routing to local repository..." -ForegroundColor Yellow
               $fallback = $true
           } else {
-              Write-Host "Authenticating to Permanent Database: $env:DB_USER/$env:DB_REPO"
+              Write-Host "Authenticating to Primary Database: $env:DB_USER/$env:DB_REPO"
               $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
-              
-              # Capture output to prevent runner from crashing on standard git auth errors
-              $cloneOutput = git clone $repoUrl C:\state-repo 2>&1
+              git clone $repoUrl C:\state-repo 2>&1 | Out-Null
               
               if (-not (Test-Path "C:\state-repo\.git")) {
-                  Write-Host "Error: Failed to clone external database. Token may be expired, or repository access denied." -ForegroundColor Red
-                  Write-Host "Initiating fallback to local repository..." -ForegroundColor Yellow
+                  Write-Host "Error: Access to primary database denied or PAT expired. Routing to local repository..." -ForegroundColor Red
                   $fallback = $true
               } else {
-                  Write-Host "Successfully connected to external permanent database." -ForegroundColor Green
+                  Write-Host "Primary database connection established." -ForegroundColor Green
               }
           }
           
-          # 2. Execute Fallback if required
           if ($fallback) {
               if (Test-Path "C:\state-repo") { Remove-Item -Path "C:\state-repo" -Recurse -Force -ErrorAction SilentlyContinue }
-              Write-Host "Cloning local repository ($env:LOCAL_REPO) as fallback state database."
-              
+              Write-Host "Cloning fallback state database: $env:LOCAL_REPO"
               $localRepoUrl = "https://x-access-token:$($env:NATIVE_TOKEN)@github.com/$env:LOCAL_REPO.git"
               git clone $localRepoUrl C:\state-repo 2>&1 | Out-Null
-              
-              if (-not (Test-Path "C:\state-repo\.git")) { 
-                  Write-Error "CRITICAL: Fallback clone also failed. Aborting workflow."
-                  exit 1 
-              }
-              Write-Host "Successfully connected to local fallback database." -ForegroundColor Green
+              if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "CRITICAL: Fallback architecture failed."; exit 1 }
+              Write-Host "Fallback database connection established." -ForegroundColor Green
           }
           
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
-      - name: Configure Core RDP Settings
+      - name: Configure Remote Desktop Services & Firewall Policies
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: Create RDP User
+      - name: Provision Local Administrator Account
         run: |
           $securePass = ConvertTo-SecureString "${{ env.RDP_PASS }}" -AsPlainText -Force
           New-LocalUser -Name "${{ env.RDP_USER }}" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "${{ env.RDP_USER }}"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${{ env.RDP_USER }}"
 
-      - name: Deploy Bulletproof Telemetry Agent & Manual Tools
+      - name: Generate Centralized Configuration Schema (RdpConfig.ps1)
+        shell: powershell
         run: |
-          $agentPath = "C:\state-repo\StateSync.ps1"
+          # -------------------------------------------------------------------
+          # USER CONFIGURATION BLOCK
+          # Modify this generated file to change what gets backed up/restored.
+          # -------------------------------------------------------------------
+          $configScript = @'
+          $targetUser = '${{ env.RDP_USER }}'
+          $userDir = "C:\Users\$targetUser"
+          $stateRepo = "C:\state-repo"
           
-          # --- COMMON DECLARATIONS ---
-          $DataMaps = @(
-              "`$targetUser = '${{ env.RDP_USER }}'",
-              '$userDir = "C:\Users\$targetUser"',
-              '$stateRepo = ''C:\state-repo''',
-              '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
-              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
-              '',
-              '$SyncRegistryMap = @{',
-              '    "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"',
-              '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
-              '    "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"',
-              '    "DWM.reg"              = "Software\Microsoft\Windows\DWM"',
-              '    "Desktop.reg"          = "Control Panel\Desktop"',
-              '}',
-              '',
-              '$SyncFolderMap = @{',
-              '    "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"',
-              '    "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"',
-              '}'
-          )
+          try {
+              $UserObj = New-Object System.Security.Principal.NTAccount($targetUser)
+              $sid = $UserObj.Translate([System.Security.Principal.SecurityIdentifier]).value
+          } catch { $sid = "UNKNOWN" }
           
-          $elevationCheck = @(
-            '# --- SELF-ELEVATION GUARD ---',
-            '$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())',
-            'if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {',
-            '    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`"";',
-            '    exit;',
-            '}'
-          )
+          # 1. REGISTRY KEYS TO SYNCHRONIZE
+          $SyncRegistryMap = @{
+              "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
+              "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+              "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
+              "DWM.reg"              = "Software\Microsoft\Windows\DWM"
+              "Desktop.reg"          = "Control Panel\Desktop"
+              # Add custom registry paths here (e.g., "Browser.reg" = "Software\Google\Chrome")
+          }
           
-          # 1. MANUAL BACKUP SCRIPT
-          $backupScript = $elevationCheck + $DataMaps + @(
-              'Write-Host "Forcing Manual Backup to Remote Database..." -ForegroundColor Green',
-              'Set-Location $stateRepo',
-              '',
-              'if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
-              'if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
-              '',
-              'Write-Host "Exporting dynamic registry mapping..."',
-              'foreach ($key in $SyncRegistryMap.Keys) {',
-              '    reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null',
-              '}',
-              '',
-              'Write-Host "Backing up dynamic directory mapping..."',
-              'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    $dest = "$stateRepo\Files\$folder"',
-              '    if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
-              '    Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
-              '}',
-              '',
-              'Write-Host "Committing and Pushing to Database (GitHub)..."',
-              'git add Registry/*.reg',
-              'git add Files/*',
-              'if (git status --porcelain) {',
-              '    git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
-              '    git push origin main',
-              '    Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
-              '} else {',
-              '    Write-Host "No changes detected. Backup skipped." -ForegroundColor Yellow',
-              '}',
-              'Start-Sleep -Seconds 5'
-          )
+          # 2. DIRECTORIES TO SYNCHRONIZE
+          $SyncFolderMap = @{
+              "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"
+              "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"
+              # Add custom folders here (e.g., "Documents" = "$userDir\Documents")
+          }
+          '@
+          $configScript | Out-File -FilePath "C:\state-repo\RdpConfig.ps1" -Encoding UTF8
+          
+          # Initialize the custom logon scripts directory
+          if (-not (Test-Path "C:\state-repo\InitScripts")) { New-Item -Path "C:\state-repo\InitScripts" -ItemType Directory -Force | Out-Null }
+
+      - name: Deploy State Synchronization Daemons & Client Tools
+        shell: powershell
+        run: |
+          $elevation = '# --- SELF-ELEVATION GUARD ---`n$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent()); if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`""; exit; }'
+
+          # 1. MANUAL BACKUP TRIGGER
+          $backupScript = "$elevation`n. C:\state-repo\RdpConfig.ps1`n" + @'
+          Write-Host "Initiating Manual State Capture..." -ForegroundColor Green
+          Set-Location $stateRepo
+          if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }
+          if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }
+          
+          foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }
+          foreach ($folder in $SyncFolderMap.Keys) {
+              $dest = "$stateRepo\Files\$folder"
+              if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
+              Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          
+          git add Registry/*.reg; git add Files/*
+          if (git status --porcelain) {
+              git commit -m "Manual Backup $(Get-Date -Format 'HH:mm:ss')"
+              git push origin main
+              Write-Host "State transmission successful." -ForegroundColor Cyan
+          } else { Write-Host "No deltas detected." -ForegroundColor Yellow }
+          Start-Sleep -Seconds 5
+          '@
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # 2. MANUAL RESTORE SCRIPT
-          $restoreScript = $elevationCheck + $DataMaps + @(
-              'Write-Host "Forcing Manual Restore from Database..." -ForegroundColor Yellow',
-              'Set-Location $stateRepo',
-              '',
-              'Write-Host "Pulling latest state from Database (GitHub)..."',
-              'git reset --hard HEAD',
-              'git pull origin main --rebase',
-              '',
-              'Write-Host "Restoring physical assets..."',
-              'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    if (Test-Path "$stateRepo\Files\$folder") {',
-              '        Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue',
-              '    }',
-              '}',
-              '',
-              'Write-Host "Applying registry map..."',
-              'if (Test-Path "$stateRepo\Registry") {',
-              '    Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
-              '        $content = Get-Content $_.FullName',
-              '        $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
-              '        $content | Out-File -FilePath $_.FullName -Encoding Unicode',
-              '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
-              '    }',
-              '    ',
-              '    Write-Host "Invoking Desktop Window Manager (Theme Engine)..."',
-              '    try {',
-              '        $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
-              '        if ($regKey) {',
-              '            $themePath = $regKey.GetValue("CurrentTheme")',
-              '            if ($themePath -and (Test-Path $themePath)) {',
-              '                Start-Process -FilePath $themePath',
-              '                Start-Sleep -Seconds 3',
-              '                Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue',
-              '            }',
-              '        }',
-              '    } catch { Write-Host "Failed to invoke theme automatically." }',
-              '    ',
-              '    Write-Host "Restarting Explorer to finalize UI elements..."',
-              '    Stop-Process -Name explorer -Force',
-              '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
-              '} else {',
-              '    Write-Host "No registry backup found in repository!" -ForegroundColor Red',
-              '}',
-              'Start-Sleep -Seconds 5'
-          )
+          # 2. MANUAL RESTORE TRIGGER
+          $restoreScript = "$elevation`n. C:\state-repo\RdpConfig.ps1`n" + @'
+          Write-Host "Initiating Manual State Restoration..." -ForegroundColor Yellow
+          Set-Location $stateRepo
+          git reset --hard HEAD; git pull origin main --rebase
+          
+          foreach ($folder in $SyncFolderMap.Keys) {
+              if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          if (Test-Path "$stateRepo\Registry") {
+              Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { 
+                  $content = Get-Content $_.FullName
+                  $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
+                  $content | Out-File -FilePath $_.FullName -Encoding Unicode
+                  Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait
+              }
+              try {
+                  $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")
+                  if ($regKey) {
+                      $themePath = $regKey.GetValue("CurrentTheme")
+                      if ($themePath -and (Test-Path $themePath)) {
+                          Start-Process -FilePath $themePath; Start-Sleep -Seconds 3
+                          Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue
+                      }
+                  }
+              } catch {}
+              Stop-Process -Name explorer -Force
+              Write-Host "Restoration complete." -ForegroundColor Cyan
+          }
+          Start-Sleep -Seconds 5
+          '@
           $restoreScript | Out-File -FilePath "C:\state-repo\Force-Restore.ps1" -Encoding UTF8
 
-          # 3. BACKGROUND TELEMETRY AGENT
-          $syncScript = @(
-              "if (`$env:USERNAME -ne '${{ env.RDP_USER }}') { exit }",
-              '$ErrorActionPreference = ''SilentlyContinue''',
-              '$logFile = "C:\state-repo\Logs\SyncAgent.log"',
-              'if (-not (Test-Path "C:\state-repo\Logs")) { New-Item -Path "C:\state-repo\Logs" -ItemType Directory -Force | Out-Null }',
-              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "[$timestamp] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
-              '',
-              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }',
-              'Copy-Item "C:\state-repo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
-              'Copy-Item "C:\state-repo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force'
-          ) + $DataMaps + @(
-              'Write-Log "=== AGENT STARTED: $sid ==="',
-              '$restoredFlag = "$env:TEMP\registry_restored.flag"',
-              '',
-              'if (-not (Test-Path $restoredFlag)) {',
-              '    foreach ($folder in $SyncFolderMap.Keys) {',
-              '        if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
-              '    }',
-              '    if (Test-Path "$stateRepo\Registry") {',
-              '        Write-Log "Found backup in DB. Restoring..."',
-              '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
-              '            $content = Get-Content $_.FullName',
-              '            $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
-              '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
-              '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
-              '        }',
-              '        try {',
-              '            $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
-              '            if ($regKey) {',
-              '                $themePath = $regKey.GetValue("CurrentTheme")',
-              '                if ($themePath -and (Test-Path $themePath)) {',
-              '                    Start-Process -FilePath $themePath',
-              '                    Start-Sleep -Seconds 3',
-              '                    Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue',
-              '                }',
-              '            }',
-              '        } catch { Write-Log "Theme invoke failed." }',
-              '        Stop-Process -Name explorer -Force',
-              '        Write-Log "Restoration Complete."',
-              '    }',
-              '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
-              '}',
-              '',
-              'while ($true) {',
-              '    Set-Location $stateRepo',
-              '    git config user.name "RDP Sync Agent"',
-              '    git config user.email "agent@rdp.local"',
-              '    git pull origin main --rebase --quiet',
-              '    ',
-              '    if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
-              '    if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
-              '    ',
-              '    foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }',
-              '    foreach ($folder in $SyncFolderMap.Keys) {',
-              '        $dest = "$stateRepo\Files\$folder"',
-              '        if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
-              '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
-              '    }',
-              '    ',
-              '    git add Registry/*.reg',
-              '    git add Files/*',
-              '    if (git status --porcelain) {',
-              '        Write-Log "SETTINGS CHANGED. Committing to DB..."',
-              '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
-              '        git push origin main --quiet',
-              '        Write-Log "Push Complete."',
-              '    } else { Write-Log "No setting changes detected." }',
-              '    ',
-              '    Start-Sleep -Seconds 300',
-              '}'
-          )
-          $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
+          # 3. BACKGROUND TELEMETRY DAEMON
+          $syncScript = ". C:\state-repo\RdpConfig.ps1`n" + @'
+          if ($env:USERNAME -ne $targetUser) { exit }
+          $ErrorActionPreference = 'SilentlyContinue'
+          $logDir = "C:\state-repo\Logs"; if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+          function Write-Log { param([string]$Message); "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Message" | Out-File -FilePath "$logDir\SyncDaemon.log" -Append -Encoding UTF8 }
+          
+          while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
+          Copy-Item "C:\state-repo\Force-Backup.ps1" "$userDir\Desktop\Force-Backup.ps1" -Force
+          Copy-Item "C:\state-repo\Force-Restore.ps1" "$userDir\Desktop\Force-Restore.ps1" -Force
+          
+          Write-Log "Daemon Initialized for SID: $sid"
+          $restoredFlag = "$env:TEMP\registry_restored.flag"
+          if (-not (Test-Path $restoredFlag)) {
+              foreach ($folder in $SyncFolderMap.Keys) { if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force } }
+              if (Test-Path "$stateRepo\Registry") {
+                  Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { 
+                      $content = Get-Content $_.FullName
+                      $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"
+                      $content | Out-File -FilePath $_.FullName -Encoding Unicode
+                      Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait
+                  }
+                  try {
+                      $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")
+                      if ($regKey) {
+                          $themePath = $regKey.GetValue("CurrentTheme")
+                          if ($themePath -and (Test-Path $themePath)) { Start-Process -FilePath $themePath; Start-Sleep -Seconds 3; Stop-Process -Name "SystemSettings" -Force }
+                      }
+                  } catch {}
+                  Stop-Process -Name explorer -Force
+              }
+              New-Item -Path $restoredFlag -ItemType File | Out-Null
+          }
+          
+          while ($true) {
+              Set-Location $stateRepo
+              git config user.name "RDP Sync Daemon"; git config user.email "daemon@rdp.local"
+              git pull origin main --rebase --quiet
+              
+              if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }
+              if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }
+              
+              foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }
+              foreach ($folder in $SyncFolderMap.Keys) {
+                  $dest = "$stateRepo\Files\$folder"
+                  if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
+                  Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force
+              }
+              
+              git add Registry/*.reg; git add Files/*
+              if (git status --porcelain) {
+                  git commit -m "Auto-save State $(Get-Date -Format 'HH:mm:ss')" --quiet
+                  git push origin main --quiet
+                  Write-Log "Delta synchronized."
+              }
+              Start-Sleep -Seconds 300
+          }
+          '@
+          $syncScript | Out-File -FilePath "C:\state-repo\StateSync.ps1" -Encoding UTF8
 
-          # 4. REGISTER TASK WITH SYSTEM-LEVEL PRIVILEGES
-          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
+          # 4. USER LOGON SCRIPT EXECUTOR (InitScripts)
+          $logonScript = @'
+          $initDir = "C:\state-repo\InitScripts"
+          if (Test-Path $initDir) {
+              Get-ChildItem -Path $initDir -File | ForEach-Object {
+                  if ($_.Extension -eq ".ps1") { Invoke-Expression $_.FullName }
+                  elseif ($_.Extension -eq ".py") { Start-Process "python" -ArgumentList $_.FullName -Wait }
+                  elseif ($_.Extension -eq ".bat" -or $_.Extension -eq ".cmd") { Start-Process $_.FullName -Wait }
+              }
+          }
+          '@
+          $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
+          
+          # Place the execution hook directly into the user's Startup folder
+          $startupFolder = "C:\Users\${{ env.RDP_USER }}\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+          $WshShell = New-Object -comObject WScript.Shell
+          $Shortcut = $WshShell.CreateShortcut("$startupFolder\InitScriptsHook.lnk")
+          $Shortcut.TargetPath = "powershell.exe"
+          $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
+          $Shortcut.Save()
+
+          # 5. REGISTER DAEMON
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"C:\state-repo\StateSync.ps1`""
           $trigger = New-ScheduledTaskTrigger -AtLogOn
           $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
           Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-          if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
-          Write-Host "Bulletproof Agent Registered."
 
-      - name: Tailscale Self-Healing & API Connection
+      - name: Establish Tailscale VPN Mesh & Resolve Orphaned Nodes
         shell: powershell
         env:
           TS_API: ${{ secrets.TAILSCALE_API_KEY }}
@@ -285,64 +265,46 @@ jobs:
           $tailnet = $env:TS_TAILNET
           if ([string]::IsNullOrWhiteSpace($tailnet)) { $tailnet = "-" } 
           
-          # 1. API SELF-HEALING BLOCK (Removes Stray Offline Nodes)
           if (-not [string]::IsNullOrWhiteSpace($env:TS_API)) {
-              Write-Host "Tailscale API Key found. Checking for stray offline devices named $hostname..."
+              Write-Host "Tailscale API Key detected. Resolving stray offline nodes ($hostname)..."
               $headers = @{ "Authorization" = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($env:TS_API):")) }
-              
               try {
                   $devicesUrl = "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices"
                   $response = Invoke-RestMethod -Uri $devicesUrl -Headers $headers -Method Get
-                  
                   $strayDevices = $response.devices | Where-Object { $_.hostname -eq $hostname }
                   
                   if ($strayDevices) {
                       foreach ($dev in $strayDevices) {
-                          Write-Host "Found phantom stray device: $($dev.hostname) (ID: $($dev.id)). Incinerating via API..."
-                          $deleteUrl = "https://api.tailscale.com/api/v2/device/$($dev.id)"
-                          Invoke-RestMethod -Uri $deleteUrl -Headers $headers -Method Delete
-                          Write-Host "Stray device $($dev.id) successfully deleted."
+                          Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/device/$($dev.id)" -Headers $headers -Method Delete
+                          Write-Host "Orphaned node $($dev.id) successfully terminated."
                       }
-                  } else {
-                      Write-Host "No stray devices found. Tailnet is clean."
-                  }
-              } catch {
-                  Write-Host "Warning: Failed to query/delete Tailscale API. Ensure TAILSCALE_TAILNET is accurate. Error: $($_.Exception.Message)"
-              }
-          } else {
-              Write-Host "No TAILSCALE_API_KEY provided. Skipping self-healing device deletion."
+                  } else { Write-Host "VPN Mesh routing is clean." }
+              } catch { Write-Host "Warning: Tailscale API resolution failed. Continuing..." -ForegroundColor Yellow }
           }
-
-          # 2. INSTALL & CONNECT TAILSCALE
-          Write-Host "Installing Tailscale Daemon..."
+          
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          
-          Write-Host "Connecting node to Tailnet as: $hostname"
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="$hostname"
           
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
-              Start-Sleep -Seconds 5; $retries++
+              $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim(); Start-Sleep -Seconds 5; $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Network failure."; exit 1 }
-          
+          if (-not $tsIP) { Write-Error "Tailscale routing failed."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Maintain Runner Session (Live Logs)
+      - name: Invoke Interactive Session Shell & Stream Diagnostics
         shell: powershell
         run: |
-          Write-Host "================ RDP ACCESS ================"
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username: ${{ env.RDP_USER }}"
-          Write-Host "Password: ${{ env.RDP_PASS }}"
-          Write-Host "============================================"
-          Write-Host "Live logs will appear below ONLY after you log in."
-          Write-Host "-----------------------------------------------------------------------------------"
-          $logFile = "C:\state-repo\Logs\SyncAgent.log"
-          $endTime = (Get-Date).AddMinutes(350)
-          $lastPosition = 0
+          Write-Host "================ SECURE VPN ENTRY ================"
+          Write-Host "Routing IP : $env:TAILSCALE_IP"
+          Write-Host "Identifier : ${{ env.RDP_USER }}"
+          Write-Host "Credential : ${{ env.RDP_PASS }}"
+          Write-Host "=================================================="
+          Write-Host "System diagnostics will stream securely upon connection..."
+          
+          $logFile = "C:\state-repo\Logs\SyncDaemon.log"
+          $endTime = (Get-Date).AddMinutes(350); $lastPosition = 0
           while ((Get-Date) -lt $endTime) {
               if (Test-Path $logFile) {
                   $file = Get-Item $logFile
@@ -351,80 +313,48 @@ jobs:
                       $fs.Seek($lastPosition,[System.IO.SeekOrigin]::Begin) | Out-Null
                       $reader =[System.IO.StreamReader]::new($fs)
                       while (-not $reader.EndOfStream) { Write-Host $reader.ReadLine() }
-                      $lastPosition = $fs.Position
-                      $reader.Close(); $fs.Close()
+                      $lastPosition = $fs.Position; $reader.Close(); $fs.Close()
                   }
               }
               Start-Sleep -Seconds 5
           }
 
-      - name: Emergency Backup on Cancellation/Timeout
+      - name: Execute Graceful Teardown & Commit Volatile State
         if: always()
         shell: powershell
         run: |
-          Write-Host "=== EMERGENCY TEARDOWN ==="
+          Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
           $stateRepo = 'C:\state-repo'
           if (-not (Test-Path $stateRepo)) { exit 0 }
           
-          Write-Host "Neutralizing Background Agents & Git Locks..."
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           if (Test-Path "$stateRepo\.git\index.lock") { Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue }
 
           try {
-              $targetUser = "${{ env.RDP_USER }}"
-              $userDir = "C:\Users\$targetUser"
-              $User = New-Object System.Security.Principal.NTAccount($targetUser)
-              $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
+              . C:\state-repo\RdpConfig.ps1
               
               if (Test-Path "Registry::HKEY_USERS\$sid") {
-                  Write-Host "Saving final state for SID: $sid"
                   Set-Location $stateRepo
-                  git config user.name "Emergency Agent"
-                  git config user.email "agent@rdp.local"
-                  
-                  $SyncRegistryMap = @{
-                      "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
-                      "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-                      "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
-                      "DWM.reg"              = "Software\Microsoft\Windows\DWM"
-                      "Desktop.reg"          = "Control Panel\Desktop"
-                  }
-                  $SyncFolderMap = @{
-                      "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"
-                      "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"
-                  }
+                  git config user.name "Emergency Daemon"; git config user.email "daemon@rdp.local"
                   
                   if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }
                   if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }
                   
-                  foreach ($key in $SyncRegistryMap.Keys) {
-                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null
-                  }
+                  foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }
                   foreach ($folder in $SyncFolderMap.Keys) {
                       $dest = "$stateRepo\Files\$folder"
                       if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
-                  git add Registry/*.reg
-                  git add Files/*
+                  git add Registry/*.reg; git add Files/*
+                  if (git status --porcelain) { git commit -m "Graceful Teardown $(Get-Date -Format 'HH:mm:ss')" --quiet }
                   
-                  if (git status --porcelain) {
-                      Write-Host "Changes detected, committing locally..."
-                      git commit -m "Emergency Save (VM Shutdown)" --quiet
-                  } else { 
-                      Write-Host "No local changes detected." 
-                  }
-                  
-                  Write-Host "Synchronizing with Database (Remote Repository)..."
                   git pull origin main --rebase --quiet
                   git push origin main --quiet
                   
-                  if ($LASTEXITCODE -eq 0) {
-                      Write-Host "Emergency Backup Complete and Successful."
-                  } else {
-                      Write-Host "Warning: Remote synchronization failed or reported exit code $LASTEXITCODE."
-                  }
+                  if ($LASTEXITCODE -eq 0) { Write-Host "Volatile state synchronized successfully." } 
+                  else { Write-Host "Warning: Remote synchronization failed (Code $LASTEXITCODE)." }
               }
-          } catch { Write-Host "Error: $($_.Exception.Message)" }
+          } catch { Write-Host "Teardown Exception: $($_.Exception.Message)" }
