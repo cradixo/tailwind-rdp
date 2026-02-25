@@ -1,4 +1,4 @@
-name: Inter-Persistent-RDP
+name: RDP-Static-Persistent-Final
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ env:
   RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
   SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'false' }}
-  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '2' }}
+  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '15' }}
 
 jobs:
   secure-rdp:
@@ -30,7 +30,7 @@ jobs:
         run: |
           $fallback = $false
           
-          if ([string]::IsNullOrWhiteSpace($env:DB_PAT) -or [string]::IsNullOrWhiteSpace($env:DB_USER) -or [string]::IsNullOrWhiteSpace($env:DB_REPO)) {
+          if ([string]::IsNullOrWhiteSpace($env:DB_PAT) -or[string]::IsNullOrWhiteSpace($env:DB_USER) -or [string]::IsNullOrWhiteSpace($env:DB_REPO)) {
               Write-Host "Warning: External database secrets missing. Routing to local repository..." -ForegroundColor Yellow
               $fallback = $true
           } else {
@@ -79,8 +79,6 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           
           Write-Host "Optimizing Desktop UI: Forcing .ps1 files to execute natively on double-click..."
-          
-          # Force Windows to inherently recognize the PowerShell Script class mapping
           cmd.exe /c "assoc .ps1=Microsoft.PowerShellScript.1" | Out-Null
           
           $psExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -90,15 +88,11 @@ jobs:
           $openPath = "$shellPath\Open\Command"
           $runPath = "$shellPath\0\Command"
           
-          # Safely construct the physical registry paths to prevent missing-path exceptions
           if (-not (Test-Path $openPath)) { New-Item -Path $openPath -Force | Out-Null }
           if (-not (Test-Path $runPath)) { New-Item -Path $runPath -Force | Out-Null }
           
-          # Override both the legacy "Open" verb and the modern "0" (Run) verb with the Bypass argument
           Set-ItemProperty -Path $openPath -Name "(default)" -Value $cmdString -Force
           Set-ItemProperty -Path $runPath -Name "(default)" -Value $cmdString -Force
-          
-          # Set the default double-click action explicitly to the Run verb
           Set-ItemProperty -Path $shellPath -Name "(default)" -Value "0" -Force
 
       - name: Provision Local Administrator Account
@@ -111,6 +105,12 @@ jobs:
       - name: Deploy State Daemons, Client Tools & Startup Executors
         shell: powershell
         run: |
+          # Construct Workspace .gitignore to sanitize Git Database from Telemetry noise
+          $gitignorePath = "C:\state-repo\.gitignore"
+          if (-not (Test-Path $gitignorePath)) {
+              "*.ps1`n*.flag`n*.log`nLogs/`nInitScripts/`n.gitignore" | Out-File -FilePath $gitignorePath -Encoding UTF8
+          }
+
           $agentPath = "C:\state-repo\StateSync.ps1"
           
           # --- COMMON DECLARATIONS ---
@@ -168,7 +168,8 @@ jobs:
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
               'git add Registry/*.reg',
               'git add Files/*',
-              'if (git status --porcelain) {',
+              '$staged = git diff --cached --name-only',
+              'if ($staged) {',
               '    git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
               '    git push origin main',
               '    Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
@@ -265,7 +266,8 @@ jobs:
               '    ',
               '    git add Registry/*.reg',
               '    git add Files/*',
-              '    if (git status --porcelain) {',
+              '    $staged = git diff --cached --name-only',
+              '    if ($staged) {',
               '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
               '        git push origin main --quiet',
               '        Write-Log "Delta synchronized."',
@@ -331,7 +333,7 @@ jobs:
               'while($true) {',
               '    Start-Sleep -Seconds 10',
               '    if (Test-Path "C:\state-repo\idle_disabled.flag") { continue }',
-              '    $idle = [IdleTime]::GetIdle()',
+              '    $idle =[IdleTime]::GetIdle()',
               '    if ($idle -gt $idleTimeoutMs) {',
               '        $wsh = New-Object -ComObject WScript.Shell',
               '        $btn = $wsh.Popup("Idle Timeout (${{ env.IDLE_TIMEOUT_MIN }}m). Shutdown in 60s.`n`nClick OK to stay.", 60, "Save Runtime", 48)',
@@ -417,7 +419,7 @@ jobs:
           while ((Get-Date) -lt $endTime) {
               if (Test-Path "C:\state-repo\end_run.flag") {
                   Write-Host "`n[ALERT] User Idle Timeout Reached! Canceling workflow via GH CLI to save runner minutes..." -ForegroundColor Yellow
-                  gh run cancel ${{ github.run_id }}
+                  gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
                   break
               }
               
@@ -501,7 +503,8 @@ jobs:
                   git add Registry/*.reg
                   git add Files/*
                   
-                  if (git status --porcelain) {
+                  $staged = git diff --cached --name-only
+                  if ($staged) {
                       Write-Host "Changes detected, committing locally..."
                       git commit -m "Emergency Save (VM Shutdown) $(Get-Date -Format 'HH:mm:ss')" --quiet
                   } else { 
