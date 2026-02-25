@@ -1,4 +1,4 @@
-name: IntraPersistent-RDP
+name: RDP-Static-Persistent-Final
 
 on:
   workflow_dispatch:
@@ -6,24 +6,35 @@ on:
 permissions:
   contents: write
 
+env:
+  # Map secrets to env variables. Fallbacks are provided just in case secrets are missed.
+  RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
+  RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-      - name: Clone Existing Tailwind Repository
+      - name: Clone Persistent Database Repository (Cross-Account)
         shell: powershell
         env:
-          MY_PAT: ${{ secrets.GH_PAT }}
-          NATIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DB_PAT: ${{ secrets.BACKUP_DB_PAT }}
+          DB_USER: ${{ secrets.BACKUP_DB_USER }}
+          DB_REPO: ${{ secrets.BACKUP_DB_REPO }}
         run: |
-          $token = $env:MY_PAT
-          if ([string]::IsNullOrWhiteSpace($token)) { $token = $env:NATIVE_TOKEN }
-          if ([string]::IsNullOrWhiteSpace($token)) { Write-Error "No Token Found"; exit 1 }
-          $repoUrl = "https://x-access-token:$token@github.com/cradixo/tailwind-rdp.git"
+          if ([string]::IsNullOrWhiteSpace($env:DB_PAT)) { Write-Error "BACKUP_DB_PAT Secret is missing!"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($env:DB_USER)) { Write-Error "BACKUP_DB_USER Secret is missing!"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($env:DB_REPO)) { Write-Error "BACKUP_DB_REPO Secret is missing!"; exit 1 }
+          
+          Write-Host "Authenticating to Permanent Database: $env:DB_USER/$env:DB_REPO"
+          # Embedding the PAT in the URL caches the credentials in the local .git/config
+          # This allows all background agent scripts to push/pull without needing the token injected into them.
+          $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
+          
           git clone $repoUrl C:\state-repo
-          if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed"; exit 1 }
+          if (-not (Test-Path "C:\state-repo\.git")) { Write-Error "Clone Failed. Check PAT permissions and Repository spelling."; exit 1 }
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -33,27 +44,24 @@ jobs:
 
       - name: Create RDP User
         run: |
-          $username = "cardersparadox"
-          $password = "Carding.Git!2024"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          $securePass = ConvertTo-SecureString "${{ env.RDP_PASS }}" -AsPlainText -Force
+          New-LocalUser -Name "${{ env.RDP_USER }}" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "${{ env.RDP_USER }}"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${{ env.RDP_USER }}"
 
       - name: Deploy Bulletproof Telemetry Agent & Manual Tools
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
-          # --- COMMON DECLARATIONS (Injected into scripts for scalability) ---
-          # This allows easy future upgrades. Just add to these arrays.
+          # --- COMMON DECLARATIONS ---
+          # We dynamically inject the env.RDP_USER into the physical script files here
           $DataMaps = @(
-              '$targetUser = ''cardersparadox''',
+              "`$targetUser = '${{ env.RDP_USER }}'",
               '$userDir = "C:\Users\$targetUser"',
               '$stateRepo = ''C:\state-repo''',
               '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
               '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
               '',
-              '# [SCHEMA UPGRADE ROOM] Add new registry keys to backup here:',
               '$SyncRegistryMap = @{',
               '    "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"',
               '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
@@ -62,7 +70,6 @@ jobs:
               '    "Desktop.reg"          = "Control Panel\Desktop"',
               '}',
               '',
-              '#[SCHEMA UPGRADE ROOM] Add new folders to backup here:',
               '$SyncFolderMap = @{',
               '    "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"',
               '    "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"',
@@ -81,10 +88,9 @@ jobs:
           
           # 1. MANUAL BACKUP SCRIPT
           $backupScript = $elevationCheck + $DataMaps + @(
-              'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
+              'Write-Host "Forcing Manual Backup to Remote Database..." -ForegroundColor Green',
               'Set-Location $stateRepo',
               '',
-              '# --- 1. CAPTURE STATE ---',
               'if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
               'if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
               '',
@@ -100,7 +106,6 @@ jobs:
               '    Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '}',
               '',
-              '# --- 2. DATABASE (SOURCE CONTROL) SYNC ---',
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
               'git add Registry/*.reg',
               'git add Files/*',
@@ -117,15 +122,13 @@ jobs:
 
           # 2. MANUAL RESTORE SCRIPT
           $restoreScript = $elevationCheck + $DataMaps + @(
-              'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
+              'Write-Host "Forcing Manual Restore from Database..." -ForegroundColor Yellow',
               'Set-Location $stateRepo',
               '',
-              '# --- 1. DATABASE (SOURCE CONTROL) SYNC ---',
               'Write-Host "Pulling latest state from Database (GitHub)..."',
               'git reset --hard HEAD',
               'git pull origin main --rebase',
               '',
-              '# --- 2. APPLY STATE ---',
               'Write-Host "Restoring physical assets..."',
               'foreach ($folder in $SyncFolderMap.Keys) {',
               '    if (Test-Path "$stateRepo\Files\$folder") {',
@@ -167,7 +170,7 @@ jobs:
 
           # 3. BACKGROUND TELEMETRY AGENT
           $syncScript = @(
-              'if ($env:USERNAME -ne "cardersparadox") { exit }',
+              "if (`$env:USERNAME -ne '${{ env.RDP_USER }}') { exit }",
               '$ErrorActionPreference = ''SilentlyContinue''',
               '$logFile = "C:\state-repo\Logs\SyncAgent.log"',
               'if (-not (Test-Path "C:\state-repo\Logs")) { New-Item -Path "C:\state-repo\Logs" -ItemType Directory -Force | Out-Null }',
@@ -180,13 +183,12 @@ jobs:
               'Write-Log "=== AGENT STARTED: $sid ==="',
               '$restoredFlag = "$env:TEMP\registry_restored.flag"',
               '',
-              '# INITIAL AUTO-RESTORE ON LOGIN',
               'if (-not (Test-Path $restoredFlag)) {',
               '    foreach ($folder in $SyncFolderMap.Keys) {',
               '        if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
               '    }',
               '    if (Test-Path "$stateRepo\Registry") {',
-              '        Write-Log "Found backup. Restoring..."',
+              '        Write-Log "Found backup in remote DB. Restoring..."',
               '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
               '            $content = Get-Content $_.FullName',
               '            $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
@@ -210,7 +212,6 @@ jobs:
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
               '}',
               '',
-              '# INFINITE SYNC LOOP',
               'while ($true) {',
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
@@ -230,7 +231,7 @@ jobs:
               '    git add Registry/*.reg',
               '    git add Files/*',
               '    if (git status --porcelain) {',
-              '        Write-Log "SETTINGS CHANGED. Committing..."',
+              '        Write-Log "SETTINGS CHANGED. Committing to DB..."',
               '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
               '        git push origin main --quiet',
               '        Write-Log "Push Complete."',
@@ -249,17 +250,61 @@ jobs:
           if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
           Write-Host "Bulletproof Agent Registered."
 
-      - name: Install and Connect Tailscale
+      - name: Tailscale Self-Healing & API Connection
+        shell: powershell
+        env:
+          TS_API: ${{ secrets.TAILSCALE_API_KEY }}
+          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
         run: |
+          $hostname = "${{ env.RDP_USER }}"
+          $tailnet = $env:TS_TAILNET
+          if ([string]::IsNullOrWhiteSpace($tailnet)) { $tailnet = "-" } # Default to user's primary tailnet if not provided
+          
+          # 1. API SELF-HEALING BLOCK (Removes Stray Offline Nodes)
+          if (-not [string]::IsNullOrWhiteSpace($env:TS_API)) {
+              Write-Host "Tailscale API Key found. Checking for stray offline devices named $hostname..."
+              # Basic Auth with API Key as username, empty password
+              $headers = @{ "Authorization" = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($env:TS_API):")) }
+              
+              try {
+                  $devicesUrl = "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices"
+                  $response = Invoke-RestMethod -Uri $devicesUrl -Headers $headers -Method Get
+                  
+                  # Find any device that exactly matches our intended hostname
+                  $strayDevices = $response.devices | Where-Object { $_.hostname -eq $hostname }
+                  
+                  if ($strayDevices) {
+                      foreach ($dev in $strayDevices) {
+                          Write-Host "Found phantom stray device: $($dev.hostname) (ID: $($dev.id)). Incinerating via API..."
+                          $deleteUrl = "https://api.tailscale.com/api/v2/device/$($dev.id)"
+                          Invoke-RestMethod -Uri $deleteUrl -Headers $headers -Method Delete
+                          Write-Host "Stray device $($dev.id) successfully deleted."
+                      }
+                  } else {
+                      Write-Host "No stray devices found. Tailnet is clean."
+                  }
+              } catch {
+                  Write-Host "Warning: Failed to query/delete Tailscale API. Ensure TAILSCALE_TAILNET is accurate. Error: $($_.Exception.Message)"
+              }
+          } else {
+              Write-Host "No TAILSCALE_API_KEY provided. Skipping self-healing device deletion."
+          }
+
+          # 2. INSTALL & CONNECT TAILSCALE
+          Write-Host "Installing Tailscale Daemon..."
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="cardersparadox"
+          
+          Write-Host "Connecting node to Tailnet as: $hostname"
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="$hostname"
+          
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
               Start-Sleep -Seconds 5; $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Network failure."; exit 1 }
+          
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Maintain Runner Session (Live Logs)
@@ -267,8 +312,8 @@ jobs:
         run: |
           Write-Host "================ RDP ACCESS ================"
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username: cardersparadox"
-          Write-Host "Password: Carding.Git!2024"
+          Write-Host "Username: ${{ env.RDP_USER }}"
+          Write-Host "Password: ${{ env.RDP_PASS }}"
           Write-Host "============================================"
           Write-Host "Live logs will appear below ONLY after you log in."
           Write-Host "-----------------------------------------------------------------------------------"
@@ -279,7 +324,7 @@ jobs:
               if (Test-Path $logFile) {
                   $file = Get-Item $logFile
                   if ($file.Length -gt $lastPosition) {
-                      $fs =[System.IO.FileStream]::new($logFile, [System.IO.FileMode]::Open,[System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                      $fs =[System.IO.FileStream]::new($logFile,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
                       $fs.Seek($lastPosition,[System.IO.SeekOrigin]::Begin) | Out-Null
                       $reader =[System.IO.StreamReader]::new($fs)
                       while (-not $reader.EndOfStream) { Write-Host $reader.ReadLine() }
@@ -298,14 +343,13 @@ jobs:
           $stateRepo = 'C:\state-repo'
           if (-not (Test-Path $stateRepo)) { exit 0 }
           
-          # --- 0. NEUTRALIZE CONCURRENCY & LOCKS ---
           Write-Host "Neutralizing Background Agents & Git Locks..."
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           if (Test-Path "$stateRepo\.git\index.lock") { Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue }
 
           try {
-              $targetUser = "cardersparadox"
+              $targetUser = "${{ env.RDP_USER }}"
               $userDir = "C:\Users\$targetUser"
               $User = New-Object System.Security.Principal.NTAccount($targetUser)
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
@@ -316,8 +360,6 @@ jobs:
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
                   
-                  # --- 1. CAPTURE FINAL STATE VIA DYNAMIC MAPS ---
-                  # These maps ensure "room for upgrades" across all scenarios.
                   $SyncRegistryMap = @{
                       "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
                       "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
@@ -342,9 +384,6 @@ jobs:
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
-                  # --- 2. DATABASE (SOURCE CONTROL) SYNC ---
-                  # Re-ordered: Add -> Commit Locally -> Pull (Merge) -> Push
-                  # Uses --quiet to suppress Git stderr streams and avoid false GitHub Action Exit Codes.
                   git add Registry/*.reg
                   git add Files/*
                   
@@ -355,7 +394,7 @@ jobs:
                       Write-Host "No local changes detected." 
                   }
                   
-                  Write-Host "Synchronizing with Database (Remote Repository)..."
+                  Write-Host "Synchronizing with Permanent Database (Remote Repository)..."
                   git pull origin main --rebase --quiet
                   git push origin main --quiet
                   
