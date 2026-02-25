@@ -2,8 +2,10 @@ $stateRepo = 'C:\state-repo'
 Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow
 Set-Location $stateRepo
 Write-Host "Pulling latest settings from GitHub..."
+# CRITICAL: Reset any local changes and pull the official state from the repo
 git reset --hard HEAD
 git pull origin main --rebase
+
 $User = New-Object System.Security.Principal.NTAccount("cardersparadox")
 $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
 Write-Host "Applying settings for SID: $sid..."
