@@ -16,66 +16,52 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Database Routing & Initialization Engine (With Fallback)
+      - name: Clone Persistent Database Repository (Cross-Account & Fallback)
         shell: powershell
         env:
           DB_PAT: ${{ secrets.BACKUP_DB_PAT }}
           DB_USER: ${{ secrets.BACKUP_DB_USER }}
           DB_REPO: ${{ secrets.BACKUP_DB_REPO }}
           NATIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CURRENT_REPO: ${{ github.repository }}
+          LOCAL_REPO: ${{ github.repository }}
         run: |
-          $fallbackUrl = "https://x-access-token:$($env:NATIVE_TOKEN)@github.com/$($env:CURRENT_REPO).git"
-          $useFallback = $false
-
-          Write-Host "=== EVALUATING DATABASE ROUTING ==="
+          $fallback = $false
+          
+          # 1. Validate External Secrets
           if ([string]::IsNullOrWhiteSpace($env:DB_PAT) -or [string]::IsNullOrWhiteSpace($env:DB_USER) -or [string]::IsNullOrWhiteSpace($env:DB_REPO)) {
-              Write-Host "Warning: Primary DB secrets are missing. Routing to Fallback Repository." -ForegroundColor Yellow
-              $useFallback = $true
+              Write-Host "Warning: External database secrets are missing. Initiating fallback to local repository..." -ForegroundColor Yellow
+              $fallback = $true
           } else {
-              Write-Host "Probing Primary Database: $env:DB_USER/$env:DB_REPO"
-              $primaryUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
+              Write-Host "Authenticating to Permanent Database: $env:DB_USER/$env:DB_REPO"
+              $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
               
-              # Ping the remote to test PAT validity without downloading payload
-              git ls-remote $primaryUrl 2>&1 | Out-Null
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Host "Warning: Primary DB access denied (PAT expired, invalid, or repo missing). Routing to Fallback." -ForegroundColor Red
-                  $useFallback = $true
+              # Capture output to prevent runner from crashing on standard git auth errors
+              $cloneOutput = git clone $repoUrl C:\state-repo 2>&1
+              
+              if (-not (Test-Path "C:\state-repo\.git")) {
+                  Write-Host "Error: Failed to clone external database. Token may be expired, or repository access denied." -ForegroundColor Red
+                  Write-Host "Initiating fallback to local repository..." -ForegroundColor Yellow
+                  $fallback = $true
               } else {
-                  Write-Host "Primary Database Authenticated successfully. Cloning..." -ForegroundColor Green
-                  git clone $primaryUrl C:\state-repo
-                  if ($LASTEXITCODE -ne 0) { 
-                      Write-Host "Clone failed unexpectedly. Routing to Fallback." -ForegroundColor Red
-                      $useFallback = $true 
-                  }
+                  Write-Host "Successfully connected to external permanent database." -ForegroundColor Green
               }
           }
-
-          if ($useFallback) {
-              Write-Host "Using Current Workflow Repository as Fallback Database." -ForegroundColor Cyan
-              if (Test-Path "C:\state-repo") { Remove-Item "C:\state-repo" -Recurse -Force }
-              git clone $fallbackUrl C:\state-repo
-              if ($LASTEXITCODE -ne 0) { Write-Error "Fatal Error: Fallback Clone Failed!"; exit 1 }
+          
+          # 2. Execute Fallback if required
+          if ($fallback) {
+              if (Test-Path "C:\state-repo") { Remove-Item -Path "C:\state-repo" -Recurse -Force -ErrorAction SilentlyContinue }
+              Write-Host "Cloning local repository ($env:LOCAL_REPO) as fallback state database."
+              
+              $localRepoUrl = "https://x-access-token:$($env:NATIVE_TOKEN)@github.com/$env:LOCAL_REPO.git"
+              git clone $localRepoUrl C:\state-repo 2>&1 | Out-Null
+              
+              if (-not (Test-Path "C:\state-repo\.git")) { 
+                  Write-Error "CRITICAL: Fallback clone also failed. Aborting workflow."
+                  exit 1 
+              }
+              Write-Host "Successfully connected to local fallback database." -ForegroundColor Green
           }
-
-          # --- HANDLE EMPTY REPOSITORY (The "Initial Error" Fix) ---
-          Write-Host "=== EVALUATING REPOSITORY STATE ==="
-          Set-Location C:\state-repo
-          if (-not (git rev-parse HEAD 2>$null)) {
-              Write-Host "Repository is completely empty. Initializing 'main' branch to prevent background sync crashes..." -ForegroundColor Magenta
-              git config user.name "System Auto-Init"
-              git config user.email "init@rdp.local"
-              git checkout -B main 2>$null
-              New-Item -Path "Database-Init.txt" -ItemType File -Value "Database Initialized securely on $(Get-Date)" | Out-Null
-              git add Database-Init.txt
-              git commit -m "Initialize Database Branch" --quiet
-              git push -u origin main --quiet
-              Write-Host "Database Initialized." -ForegroundColor Green
-          } else {
-              Write-Host "Database state found. Proceeding."
-          }
-
-          # Ensure scripts have full permission to modify the cloned DB folder
+          
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
       - name: Configure Core RDP Settings
@@ -95,7 +81,6 @@ jobs:
           $agentPath = "C:\state-repo\StateSync.ps1"
           
           # --- COMMON DECLARATIONS ---
-          # We dynamically inject the env.RDP_USER into the physical script files here
           $DataMaps = @(
               "`$targetUser = '${{ env.RDP_USER }}'",
               '$userDir = "C:\Users\$targetUser"',
@@ -117,7 +102,6 @@ jobs:
               '}'
           )
           
-          # --- SELF-ELEVATION GUARD CLAUSE ---
           $elevationCheck = @(
             '# --- SELF-ELEVATION GUARD ---',
             '$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())',
@@ -291,7 +275,7 @@ jobs:
           if (Test-Path "C:\state-repo\Logs\*.log") { Remove-Item "C:\state-repo\Logs\*.log" -Force }
           Write-Host "Bulletproof Agent Registered."
 
-      - name: Tailscale Self-Healing API & Connection
+      - name: Tailscale Self-Healing & API Connection
         shell: powershell
         env:
           TS_API: ${{ secrets.TAILSCALE_API_KEY }}
@@ -299,7 +283,7 @@ jobs:
         run: |
           $hostname = "${{ env.RDP_USER }}"
           $tailnet = $env:TS_TAILNET
-          if ([string]::IsNullOrWhiteSpace($tailnet)) { $tailnet = "-" } # Default to user's primary tailnet if not provided
+          if ([string]::IsNullOrWhiteSpace($tailnet)) { $tailnet = "-" } 
           
           # 1. API SELF-HEALING BLOCK (Removes Stray Offline Nodes)
           if (-not [string]::IsNullOrWhiteSpace($env:TS_API)) {
@@ -310,7 +294,6 @@ jobs:
                   $devicesUrl = "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices"
                   $response = Invoke-RestMethod -Uri $devicesUrl -Headers $headers -Method Get
                   
-                  # Find any device that exactly matches our intended hostname
                   $strayDevices = $response.devices | Where-Object { $_.hostname -eq $hostname }
                   
                   if ($strayDevices) {
@@ -413,4 +396,35 @@ jobs:
                   }
                   
                   if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }
-                  if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType
+                  if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }
+                  
+                  foreach ($key in $SyncRegistryMap.Keys) {
+                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null
+                  }
+                  foreach ($folder in $SyncFolderMap.Keys) {
+                      $dest = "$stateRepo\Files\$folder"
+                      if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
+                      Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+
+                  git add Registry/*.reg
+                  git add Files/*
+                  
+                  if (git status --porcelain) {
+                      Write-Host "Changes detected, committing locally..."
+                      git commit -m "Emergency Save (VM Shutdown)" --quiet
+                  } else { 
+                      Write-Host "No local changes detected." 
+                  }
+                  
+                  Write-Host "Synchronizing with Database (Remote Repository)..."
+                  git pull origin main --rebase --quiet
+                  git push origin main --quiet
+                  
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host "Emergency Backup Complete and Successful."
+                  } else {
+                      Write-Host "Warning: Remote synchronization failed or reported exit code $LASTEXITCODE."
+                  }
+              }
+          } catch { Write-Host "Error: $($_.Exception.Message)" }
