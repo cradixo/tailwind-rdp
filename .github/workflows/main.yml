@@ -63,9 +63,7 @@ jobs:
       - name: Deploy Robust Manual Tools (Embedded Config)
         shell: powershell
         run: |
-          # --- GENERATION CONFIGURATION ---
-          # We embed these variables DIRECTLY into the script strings to avoid runtime scope issues.
-          
+          # --- CONFIGURATION HEADER ---
           $CommonHeader = @(
               '# --- SELF-ELEVATION GUARD ---',
               '$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())',
@@ -125,7 +123,7 @@ jobs:
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # 2. FORCE RESTORE SCRIPT (FIXED: Kill Explorer FIRST)
+          # 2. FORCE RESTORE SCRIPT (Fixed with TaskKill)
           $restoreScript = $CommonHeader + @(
               '',
               'Write-Host "Initiating Manual Restore..." -ForegroundColor Yellow',
@@ -133,8 +131,8 @@ jobs:
               'git reset --hard HEAD; git pull origin main --rebase',
               '',
               '# --- CRITICAL: UNLOCK FILES ---',
-              'Write-Host "Closing Explorer to unlock files..."',
-              'Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue',
+              'Write-Host "Terminating Explorer to unlock files..."',
+              'taskkill /F /IM explorer.exe 2>$null',
               'Start-Sleep -Seconds 2',
               '',
               '# --- RESTORE FILES ---',
@@ -171,8 +169,7 @@ jobs:
       - name: Deploy Background Sync Daemon (StateSync.ps1)
         shell: powershell
         run: |
-          # The Daemon uses a slightly different logic (Check if Explorer exists -> Restore -> Loop)
-          # We embed the variables here too for safety.
+          # The Daemon uses a persistence loop to keep icons on the Desktop
           $daemonScript = @(
               "`$targetUser = '${{ env.RDP_USER }}'",
               '`$stateRepo = "C:\state-repo"',
@@ -213,7 +210,6 @@ jobs:
               '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
               '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '        }',
-              '        # We do NOT kill explorer here to avoid login loop crashes, we just reload reg',
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
               '}',
@@ -296,7 +292,7 @@ jobs:
                       return (uint)Environment.TickCount - info.dwTime;
                   }
               }
-          "@
+"@
               $idleTimeoutMs = 15 * 60 * 1000 # 15 minutes
               while($true) {
                   Start-Sleep -Seconds 10
@@ -308,7 +304,7 @@ jobs:
                       if ($btn -eq -1) { New-Item "C:\state-repo\end_run.flag" -Force; exit }
                   }
               }
-          '@
+'@
               $idleDaemon | Out-File "C:\state-repo\SaveRuntimeDaemon.ps1" -Encoding UTF8
               
               $action2 = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"C:\state-repo\SaveRuntimeDaemon.ps1`""
@@ -319,7 +315,7 @@ jobs:
               $wshell = New-Object -ComObject Wscript.Shell
               if (Test-Path $flag) { Remove-Item $flag -Force; $wshell.Popup("Auto-Shutdown ENABLED.", 4, "Status", 64) } 
               else { New-Item $flag -ItemType File -Force; $wshell.Popup("Auto-Shutdown DISABLED.", 4, "Status", 48) }
-              '@
+'@
               $toggleScript | Out-File "C:\state-repo\Toggle-AutoShutdown.ps1" -Encoding UTF8
               
               $publicDesktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
