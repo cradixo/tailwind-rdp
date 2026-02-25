@@ -172,6 +172,13 @@ jobs:
           $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
           Set-ItemProperty -Path $tsPath -Name "fClientDisableUDP" -Value 1 -Force
+          
+          # RDP: Allow Desktop Wallpaper (Windows Server strips it by default)
+          $rdpEnvPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          Set-ItemProperty -Path $rdpEnvPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Force
+          
+          $rdpSessPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty -Path $rdpSessPath -Name "fDisableWallpaper" -Value 0 -Force
           Write-Host "::endgroup::"
           
           $psExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -339,10 +346,14 @@ jobs:
               'Write-Log "=== DAEMON INITIALIZED: $sid ==="',
               '$restoredFlag = "$env:TEMP\registry_restored.flag"',
               '',
-              '# PERFORMANCE: Disable Visual FX inside the active user session (Corrected Logic)',
+              '# PERFORMANCE: Custom Visual FX (keep wallpaper, cut animations)',
               '$fxPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"',
               'if (-not (Test-Path $fxPath)) { New-Item -Path $fxPath -Force | Out-Null }',
-              'Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue',
+              'Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 3 -Force -ErrorAction SilentlyContinue',
+              '',
+              '# Ensure wallpaper rendering is not stripped by RDP session policy',
+              '$userDesktop = "HKCU:\Control Panel\Desktop"',
+              'Set-ItemProperty -Path $userDesktop -Name "WallpaperStyle" -Value "10" -Force -ErrorAction SilentlyContinue',
               '',
               'if (-not (Test-Path $restoredFlag)) {',
               '    # DOUBLE-TAP: Clean desktop again upon user login to catch any stragglers from Default Profile',
