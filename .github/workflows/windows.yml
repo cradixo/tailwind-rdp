@@ -245,24 +245,24 @@ jobs:
               'Write-Host "Forcing Manual Backup to Remote Database..." -ForegroundColor Green',
               'Set-Location $stateRepo',
               '',
-              'if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
-              'if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
+              'if (-not (Test-Path "$stateRepo\Windows\Registry")) { New-Item -Path "$stateRepo\Windows\Registry" -ItemType Directory -Force | Out-Null }',
+              'if (-not (Test-Path "$stateRepo\Windows\Files")) { New-Item -Path "$stateRepo\Windows\Files" -ItemType Directory -Force | Out-Null }',
               '',
               'Write-Host "Exporting dynamic registry mapping..."',
               'foreach ($key in $SyncRegistryMap.Keys) {',
-              '    reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null',
+              '    reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Windows\Registry\$key" /y | Out-Null',
               '}',
               '',
               'Write-Host "Backing up dynamic directory mapping..."',
               'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    $dest = "$stateRepo\Files\$folder"',
+              '    $dest = "$stateRepo\Windows\Files\$folder"',
               '    if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
               '    Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '}',
               '',
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
-              'git add Registry/*.reg',
-              'git add Files/*',
+              'git add Windows/Registry/*.reg',
+              'git add Windows/Files/*',
               '$staged = git diff --cached --name-only',
               'if ($staged) {',
               '    git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
@@ -286,14 +286,14 @@ jobs:
               '',
               'Write-Host "Restoring physical assets..."',
               'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    if (Test-Path "$stateRepo\Files\$folder") {',
-              '        Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue',
+              '    if (Test-Path "$stateRepo\Windows\Files\$folder") {',
+              '        Copy-Item -Path "$stateRepo\Windows\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '}',
               '',
               'Write-Host "Applying registry map..."',
-              'if (Test-Path "$stateRepo\Registry") {',
-              '    Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
+              'if (Test-Path "$stateRepo\Windows\Registry") {',
+              '    Get-ChildItem -Path "$stateRepo\Windows\Registry" -Filter "*.reg" | ForEach-Object { ',
               '        $content = Get-Content $_.FullName',
               '        $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
               '        $content | Out-File -FilePath $_.FullName -Encoding Unicode',
@@ -304,7 +304,7 @@ jobs:
               '    Stop-Process -Name explorer -Force',
               '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
               '} else {',
-              '    Write-Host "No registry backup found in repository!" -ForegroundColor Red',
+              '    Write-Host "No registry backup found in repository (Windows subdirectory)!" -ForegroundColor Red',
               '}',
               'Start-Sleep -Seconds 5'
           )
@@ -336,11 +336,11 @@ jobs:
               '    Get-ChildItem -Path "$env:USERPROFILE\Desktop" -Filter "*.lnk" -Force | Where-Object { $_.Name -notmatch "Firefox|Chrome|Edge|Force|Toggle" } | Remove-Item -Force -ErrorAction SilentlyContinue',
               '    ',
               '    foreach ($folder in $SyncFolderMap.Keys) {',
-              '        if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
+              '        if (Test-Path "$stateRepo\Windows\Files\$folder") { Copy-Item -Path "$stateRepo\Windows\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
               '    }',
-              '    if (Test-Path "$stateRepo\Registry") {',
-              '        Write-Log "Found backup in DB. Restoring..."',
-              '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
+              '    if (Test-Path "$stateRepo\Windows\Registry") {',
+              '        Write-Log "Found backup in DB (Windows folder). Restoring..."',
+              '        Get-ChildItem -Path "$stateRepo\Windows\Registry" -Filter "*.reg" | ForEach-Object { ',
               '            $content = Get-Content $_.FullName; $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
               '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
               '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
@@ -357,23 +357,23 @@ jobs:
               '    git config user.email "agent@rdp.local"',
               '    git pull origin main --rebase --strategy-option=theirs --quiet',
               '    ',
-              '    if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
-              '    if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
+              '    if (-not (Test-Path "$stateRepo\Windows\Registry")) { New-Item -Path "$stateRepo\Windows\Registry" -ItemType Directory -Force | Out-Null }',
+              '    if (-not (Test-Path "$stateRepo\Windows\Files")) { New-Item -Path "$stateRepo\Windows\Files" -ItemType Directory -Force | Out-Null }',
               '    ',
-              '    foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }',
+              '    foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Windows\Registry\$key" /y | Out-Null }',
               '    foreach ($folder in $SyncFolderMap.Keys) {',
-              '        $dest = "$stateRepo\Files\$folder"',
+              '        $dest = "$stateRepo\Windows\Files\$folder"',
               '        if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
               '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    ',
-              '    git add Registry/*.reg',
-              '    git add Files/*',
+              '    git add Windows/Registry/*.reg',
+              '    git add Windows/Files/*',
               '    $staged = git diff --cached --name-only',
               '    if ($staged) {',
               '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
               '        git push origin main --quiet',
-              '        Write-Log "Delta synchronized."',
+              '        Write-Log "Delta synchronized via Windows folder."',
               '    }',
               '    Start-Sleep -Seconds 300',
               '}'
@@ -666,27 +666,27 @@ jobs:
                       "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"
                   }
                   
-                  if (-not (Test-Path "$stateRepo\Registry")) { 
-                      New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null 
+                  if (-not (Test-Path "$stateRepo\Windows\Registry")) { 
+                      New-Item -Path "$stateRepo\Windows\Registry" -ItemType Directory -Force | Out-Null 
                   }
-                  if (-not (Test-Path "$stateRepo\Files")) { 
-                      New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null 
+                  if (-not (Test-Path "$stateRepo\Windows\Files")) { 
+                      New-Item -Path "$stateRepo\Windows\Files" -ItemType Directory -Force | Out-Null 
                   }
                   
                   foreach ($key in $SyncRegistryMap.Keys) {
-                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null
+                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Windows\Registry\$key" /y | Out-Null
                   }
                   
                   foreach ($folder in $SyncFolderMap.Keys) {
-                      $dest = "$stateRepo\Files\$folder"
+                      $dest = "$stateRepo\Windows\Files\$folder"
                       if (-not (Test-Path $dest)) { 
                           New-Item -Path $dest -ItemType Directory -Force | Out-Null 
                       }
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
-                  git add Registry/*.reg
-                  git add Files/*
+                  git add Windows/Registry/*.reg
+                  git add Windows/Files/*
                   
                   $staged = git diff --cached --name-only
                   if ($staged) {
