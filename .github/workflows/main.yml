@@ -35,7 +35,7 @@ jobs:
               Write-Host "Authenticating to Primary Database: $env:DB_USER/$env:DB_REPO"
               $repoUrl = "https://$($env:DB_USER):$($env:DB_PAT)@github.com/$($env:DB_USER)/$($env:DB_REPO).git"
               
-              # FIXED: Using cmd.exe to suppress stderr and prevent NativeCommandError crashes
+              # Using cmd.exe to suppress stderr and prevent NativeCommandError crashes
               cmd.exe /c "git clone -q `"$repoUrl`" C:\state-repo 2>nul"
               
               if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) {
@@ -260,8 +260,8 @@ jobs:
                       return (uint)Environment.TickCount - info.dwTime;
                   }
               }
-              "@
-              
+          "@
+          
               $idleTimeoutMs = 15 * 60 * 1000 # 15 minutes
               while($true) {
                   Start-Sleep -Seconds 10
@@ -270,17 +270,15 @@ jobs:
                   $idle = [IdleTime]::GetIdle()
                   if ($idle -gt $idleTimeoutMs) {
                       $wsh = New-Object -ComObject WScript.Shell
-                      # 4096 = Topmost System Modal, 48 = Exclamation Icon
                       $btn = $wsh.Popup("No activity detected for 15 minutes. Workflow will cancel in 60 seconds to save minutes.`n`nClick OK to stay connected.", 60, "Idle Timeout", 1 + 48 + 4096)
                       
                       if ($btn -eq -1) {
-                          # Timeout reached. Signal the workflow to gracefully shut down.
                           New-Item -Path "C:\state-repo\end_run.flag" -ItemType File -Force | Out-Null
                           exit
                       }
                   }
               }
-              '@
+          '@
               $idleDaemon | Out-File "C:\state-repo\SaveRuntimeDaemon.ps1" -Encoding UTF8
               
               $action2 = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"C:\state-repo\SaveRuntimeDaemon.ps1`""
@@ -296,7 +294,7 @@ jobs:
                   New-Item $flag -ItemType File -Force | Out-Null
                   $wshell.Popup("Auto-Shutdown is now DISABLED for this session.", 4, "Save Runtime", 48)
               }
-              '@
+          '@
               $toggleScript | Out-File "C:\Users\${{ env.RDP_USER }}\Desktop\Toggle-AutoShutdown.ps1" -Encoding UTF8
           } else { Write-Host "Save-Runtime feature disabled via secret." }
 
