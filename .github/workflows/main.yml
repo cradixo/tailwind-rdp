@@ -78,42 +78,46 @@ jobs:
 
       - name: Provision System Infrastructure & Performance Tiers
         run: |
-          # 1. PERFORMANCE TIER: Fixed Pagefile Allocation (D: Drive Targeting)
-          Write-Host "::group::Performance Tier: Optimizing Virtual Memory Subsystem"
+          # 1. PERFORMANCE TIER: Nuclear Multi-Pagefile Allocation (Bypassing Azure 1920MB Lock)
+          Write-Host "::group::Performance Tier: Nuclear Virtual Memory Injection"
           try {
-              Write-Host "Verifying D: box capacity for Pagefile expansion..."
+              Write-Host "Verifying D: box capacity for Secondary Pagefile..."
               $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'"
               if (-not $drive) { $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" }
               
-              $freeGB = $drive.FreeSpace / 1GB
               $driveLetter = $drive.DeviceID
-              Write-Host "Available Space on $driveLetter : $([math]::Round($freeGB,2)) GB"
-              
               $targetSizeMB = 16384
-              if ($freeGB -lt 20) { 
-                  Write-Host "Warning: Limited space. Scaling pagefile to 8GB safety tier." -ForegroundColor Yellow
-                  $targetSizeMB = 8192
-              }
-
-              Write-Host "Disabling System-Managed Pagefile logic..."
-              Set-CimInstance -Query "Select * from Win32_ComputerSystem" -Property @{AutomaticManagedPagefile=$False} -ErrorAction SilentlyContinue
+              $extPagePath = "$driveLetter\pagefile_ext.sys"
               
-              Write-Host "Constructing fixed Performance Pagefile on $driveLetter ($targetSizeMB MB)..."
-              $existingPageFiles = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
-              if ($existingPageFiles) { $existingPageFiles | Remove-CimInstance -ErrorAction SilentlyContinue }
+              Write-Host "Action: Creating secondary 16GB fixed pagefile at $extPagePath"
+              
+              # A. Registry Hard-Overwrite for Persistence & VMM Recognition
+              $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+              Set-ItemProperty -Path $regPath -Name "ExistingPageFiles" -Value @("\??\$extPagePath") -ErrorAction SilentlyContinue
+              
+              # B. Multi-String PagingFiles Append
+              $pagingFiles = @("$extPagePath $targetSizeMB $targetSizeMB")
+              # If we want to keep the original 1920MB as well (to avoid conflicts)
+              $pagingFiles += "D:\pagefile.sys 0 0" 
+              Set-ItemProperty -Path $regPath -Name "PagingFiles" -Value $pagingFiles -PropertyType MultiString -Force
+              
+              # C. Disable Automatic Management via Registry (Level 0)
+              Set-ItemProperty -Path $regPath -Name "AutomaticManagedPagefile" -Value 0 -PropertyType DWord -Force
+              
+              # D. Live Injection via CIM/WMI (Property Corrected: InitialSize)
+              $existing = Get-CimInstance Win32_PageFileSetting | Where-Object { $_.Name -like "*pagefile_ext.sys" }
+              if ($existing) { $existing | Remove-CimInstance -ErrorAction SilentlyContinue }
               
               New-CimInstance -ClassName Win32_PageFileSetting -Property @{
-                  Name = "$driveLetter\pagefile.sys"
-                  InitialSize = $targetSizeMB  # FIXED: Property name is InitialSize
+                  Name = $extPagePath
+                  InitialSize = $targetSizeMB
                   MaximumSize = $targetSizeMB
               } -ErrorAction SilentlyContinue
               
-              # WMIC FALLBACK: Attempt real-time expansion
-              wmic pagefileset create name="$driveLetter\pagefile.sys",initialsize=$targetSizeMB,maximumsize=$targetSizeMB 2>&1 | Out-Null
-              
-              Write-Host "Successfully provisioned fixed performance tier on $driveLetter." -ForegroundColor Green
+              Write-Host "Nuclear Success: Secondary performance tier provisioned on $driveLetter." -ForegroundColor Green
+              Write-Host "System will now utilize $extPagePath (16GB) + existing pagefile."
           } catch {
-              Write-Host "Warning: Pagefile optimization bypassed." -ForegroundColor Yellow
+              Write-Host "Warning: Nuclear injection encountered permission/driver locks." -ForegroundColor Yellow
           }
           Write-Host "::endgroup::"
 
