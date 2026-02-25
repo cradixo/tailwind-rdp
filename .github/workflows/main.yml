@@ -1,4 +1,4 @@
-name: RDP-Static-Persistent-Final
+name: RDP-Inter-Persistent-Final
 
 on:
   workflow_dispatch:
