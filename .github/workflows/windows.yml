@@ -75,17 +75,6 @@ jobs:
           }
           
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
-          
-          # CRITICAL: Disable CRLF conversion to prevent binary corruption (TranscodedWallpaper, theme files)
-          Set-Location "C:\state-repo"
-          git config core.autocrlf false
-          
-          # Create .gitattributes if missing (state repo is DATA, not code — no text conversion needed)
-          $gitattrsPath = "C:\state-repo\.gitattributes"
-          if (-not (Test-Path $gitattrsPath)) {
-              "* -text" | Out-File -FilePath $gitattrsPath -Encoding ASCII -NoNewline
-              Write-Host "Created .gitattributes to prevent binary file corruption."
-          }
 
       - name: Provision System Infrastructure & Performance Tiers
         run: |
@@ -235,11 +224,8 @@ jobs:
               '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
               '    "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"',
               '    "Taskband.reg"         = "Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"',
-              '    "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"',
-              '    "Accent.reg"           = "Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"',
               '    "DWM.reg"              = "Software\Microsoft\Windows\DWM"',
               '    "Desktop.reg"          = "Control Panel\Desktop"',
-              '    "Colors.reg"           = "Control Panel\Colors"',
               '}',
               '',
               '$SyncFolderMap = @{',
@@ -687,11 +673,8 @@ jobs:
                       "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
                       "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
                       "Taskband.reg"         = "Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"
-                      "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"
-                      "Accent.reg"           = "Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"
                       "DWM.reg"              = "Software\Microsoft\Windows\DWM"
                       "Desktop.reg"          = "Control Panel\Desktop"
-                      "Colors.reg"           = "Control Panel\Colors"
                   }
                   $SyncFolderMap = @{
                       "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"
