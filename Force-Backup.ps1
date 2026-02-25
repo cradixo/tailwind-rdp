@@ -1,3 +1,9 @@
+# --- SELF-ELEVATION GUARD ---
+$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`"";
+    exit;
+}
 $stateRepo = 'C:\state-repo'
 Write-Host "Forcing Manual Backup..." -ForegroundColor Green
 Set-Location $stateRepo
