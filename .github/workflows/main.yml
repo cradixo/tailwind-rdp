@@ -1,4 +1,4 @@
-name: RDP-Static-Persistent-Final
+name: Persistent RDP Ultimate
 
 on:
   workflow_dispatch:
@@ -11,13 +11,13 @@ env:
   RDP_PASS: SecureP@ssw0rd!2024
 
 jobs:
-  secure-rdp:
+  rdp:
     runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
 
-    - name: Clone State Repo
+    - name: Clone persistence repo
       shell: powershell
       run: |
         git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} C:\state-repo
@@ -31,134 +31,164 @@ jobs:
         netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
 
 
-    - name: Create User
+    - name: Create persistent user
       shell: powershell
       run: |
-        $pass = ConvertTo-SecureString "${{ env.RDP_PASS }}" -AsPlainText -Force
+        $pass=ConvertTo-SecureString "${{ env.RDP_PASS }}" -AsPlainText -Force
         New-LocalUser -Name "${{ env.RDP_USER }}" -Password $pass -AccountNeverExpires
-        Add-LocalGroupMember -Group "Administrators" -Member "${{ env.RDP_USER }}"
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${{ env.RDP_USER }}"
+        Add-LocalGroupMember Administrators "${{ env.RDP_USER }}"
+        Add-LocalGroupMember "Remote Desktop Users" "${{ env.RDP_USER }}"
 
 
-    - name: Deploy Persistence System
+    - name: Deploy persistence engine
       shell: powershell
       run: |
 
-        $repo = "C:\state-repo"
-        $user = "${{ env.RDP_USER }}"
-        $desktop = "C:\Users\$user\Desktop"
+        $repo="C:\state-repo"
 
-        New-Item $repo -ItemType Directory -Force | Out-Null
-
-        # Backup script
-        @'
-Set-Location C:\state-repo
-git add .
-if (git status --porcelain) {
- git commit -m "Backup"
- git push
-}
-'@ | Out-File "$repo\ForceBackup.ps1" -Encoding UTF8
+        mkdir "$repo\Registry" -ea 0
+        mkdir "$repo\Files" -ea 0
+        mkdir "$repo\InitScripts" -ea 0
 
 
-        # Restore script
-        @'
-Set-Location C:\state-repo
-git pull
-Stop-Process explorer -Force
-'@ | Out-File "$repo\ForceRestore.ps1" -Encoding UTF8
+        ################################
+        # BACKUP SCRIPT
+        ################################
+
+        $backup=@(
+        '$repo="C:\state-repo"',
+        'Set-Location $repo',
+        'git add .',
+        'if(git status --porcelain){',
+        ' git commit -m "Manual backup"',
+        ' git push',
+        '}'
+        )
+        $backup | Out-File "$repo\ForceBackup.ps1" -Encoding UTF8
 
 
-        # Toggle script
-        @'
-$flag="C:\state-repo\idle_disabled.flag"
-if(Test-Path $flag){
- Remove-Item $flag
-}else{
- New-Item $flag -ItemType File
-}
-'@ | Out-File "$repo\ToggleRuntime.ps1" -Encoding UTF8
+        ################################
+        # RESTORE SCRIPT
+        ################################
+
+        $restore=@(
+        '$repo="C:\state-repo"',
+        'Set-Location $repo',
+        'git pull',
+        'Stop-Process explorer -Force'
+        )
+        $restore | Out-File "$repo\ForceRestore.ps1"
 
 
-        # Idle Monitor
-        @'
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Idle {
- [DllImport("user32.dll")]
- public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
- public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
- public static uint Time() {
-  LASTINPUTINFO li=new LASTINPUTINFO();
-  li.cbSize=(uint)System.Runtime.InteropServices.Marshal.SizeOf(li);
-  GetLastInputInfo(ref li);
-  return ((uint)Environment.TickCount-li.dwTime);
- }
-}
-"@
+        ################################
+        # RUNTIME TOGGLE SCRIPT
+        ################################
 
-while($true){
- Start-Sleep 10
- if(Test-Path C:\state-repo\idle_disabled.flag){continue}
- if([Idle]::Time() -gt 900000){
-  New-Item C:\state-repo\end.flag -Force
-  exit
- }
-}
-'@ | Out-File "$repo\IdleMonitor.ps1" -Encoding UTF8
+        $toggle=@(
+        '$flag="C:\state-repo\idle_disabled.flag"',
+        'if(Test-Path $flag){',
+        ' Remove-Item $flag',
+        ' msg * "Runtime auto-shutdown ENABLED"',
+        '}',
+        'else{',
+        ' New-Item $flag -ItemType File',
+        ' msg * "Runtime auto-shutdown DISABLED"',
+        '}'
+        )
+        $toggle | Out-File "$repo\ToggleRuntime.ps1"
 
 
-        # Agent
-        @'
-$user = $env:USERNAME
-$desktop = "C:\Users\$user\Desktop"
+        ################################
+        # INIT SCRIPT EXECUTOR
+        ################################
 
-Copy-Item C:\state-repo\ForceBackup.ps1 $desktop -Force
-Copy-Item C:\state-repo\ForceRestore.ps1 $desktop -Force
-Copy-Item C:\state-repo\ToggleRuntime.ps1 $desktop -Force
-
-powershell -WindowStyle Hidden -File C:\state-repo\IdleMonitor.ps1
-
-if (!(Test-Path C:\state-repo\restore.flag)) {
- powershell -File C:\state-repo\ForceRestore.ps1
- New-Item C:\state-repo\restore.flag
-}
-
-while($true){
- if(Test-Path C:\state-repo\end.flag){
-  powershell -File C:\state-repo\ForceBackup.ps1
-  exit
- }
- Start-Sleep 5
-}
-'@ | Out-File "$repo\Agent.ps1" -Encoding UTF8
+        $init=@(
+        '$dir="C:\state-repo\InitScripts"',
+        'if(Test-Path $dir){',
+        ' Get-ChildItem $dir | ForEach-Object {',
+        '  if($_.Extension -eq ".ps1"){powershell -File $_.FullName}',
+        '  if($_.Extension -eq ".cmd"){cmd /c $_.FullName}',
+        '  if($_.Extension -eq ".bat"){cmd /c $_.FullName}',
+        '  if($_.Extension -eq ".py"){python $_.FullName}',
+        ' }',
+        '}'
+        )
+        $init | Out-File "$repo\RunInit.ps1"
 
 
-        # Register scheduled task
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -File C:\state-repo\Agent.ps1"
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
+        ################################
+        # IDLE MONITOR
+        ################################
 
-        Register-ScheduledTask -TaskName "PersistenceAgent" -Action $action -Trigger $trigger -Principal $principal -Force
+        $idle=@(
+        'Add-Type -AssemblyName System.Windows.Forms',
+        'while($true){',
+        ' Start-Sleep 10',
+        ' if(Test-Path C:\state-repo\idle_disabled.flag){continue}',
+        ' $idle=[System.Windows.Forms.SystemInformation]::IdleTime',
+        ' if($idle -gt 900000){',
+        '  msg * "Idle detected. Shutdown in 60 seconds."',
+        '  Start-Sleep 60',
+        '  if($idle -gt 900000){',
+        '   New-Item C:\state-repo\end.flag -Force',
+        '   exit',
+        '  }',
+        ' }',
+        '}'
+        )
+        $idle | Out-File "$repo\IdleMonitor.ps1"
 
 
-    - name: Install Tailscale
+        ################################
+        # MAIN AGENT
+        ################################
+
+        $agent=@(
+        '$desktop="C:\Users\$env:USERNAME\Desktop"',
+        'Copy-Item C:\state-repo\ForceBackup.ps1 $desktop -Force',
+        'Copy-Item C:\state-repo\ForceRestore.ps1 $desktop -Force',
+        'Copy-Item C:\state-repo\ToggleRuntime.ps1 $desktop -Force',
+        'powershell -WindowStyle Hidden -File C:\state-repo\RunInit.ps1',
+        'powershell -WindowStyle Hidden -File C:\state-repo\IdleMonitor.ps1',
+        'if(!(Test-Path C:\state-repo\restore.flag)){',
+        ' powershell -File C:\state-repo\ForceRestore.ps1',
+        ' New-Item C:\state-repo\restore.flag',
+        '}',
+        'while($true){',
+        ' if(Test-Path C:\state-repo\end.flag){',
+        '  powershell -File C:\state-repo\ForceBackup.ps1',
+        '  exit',
+        ' }',
+        ' Start-Sleep 5',
+        '}'
+        )
+        $agent | Out-File "$repo\Agent.ps1"
+
+
+        ################################
+        # REGISTER AGENT
+        ################################
+
+        $action=New-ScheduledTaskAction -Execute powershell.exe -Argument "-WindowStyle Hidden -File C:\state-repo\Agent.ps1"
+        $trigger=New-ScheduledTaskTrigger -AtLogOn
+        $principal=New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
+
+        Register-ScheduledTask -TaskName PersistenceAgent -Action $action -Trigger $trigger -Principal $principal -Force
+
+
+    - name: Install tailscale
       shell: powershell
       run: |
         Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe -OutFile ts.exe
         Start-Process ts.exe /quiet -Wait
         & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="${{ env.RDP_USER }}"
-        $ip=& "C:\Program Files\Tailscale\tailscale.exe" ip -4
-        echo "IP=$ip"
-        
+        & "C:\Program Files\Tailscale\tailscale.exe" ip -4
 
-    - name: Session Loop
+
+    - name: Maintain session
       shell: powershell
       run: |
         while($true){
-         if(Test-Path C:\state-repo\end.flag){
-          exit
-         }
-         Start-Sleep 5
+          if(Test-Path C:\state-repo\end.flag){exit}
+          Start-Sleep 5
         }
