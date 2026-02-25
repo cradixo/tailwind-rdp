@@ -104,9 +104,12 @@ jobs:
               
               New-CimInstance -ClassName Win32_PageFileSetting -Property @{
                   Name = "$driveLetter\pagefile.sys"
-                  MinimumSize = $targetSizeMB
+                  InitialSize = $targetSizeMB  # FIXED: Property name is InitialSize
                   MaximumSize = $targetSizeMB
               } -ErrorAction SilentlyContinue
+              
+              # WMIC FALLBACK: Attempt real-time expansion
+              wmic pagefileset create name="$driveLetter\pagefile.sys",initialsize=$targetSizeMB,maximumsize=$targetSizeMB 2>&1 | Out-Null
               
               Write-Host "Successfully provisioned fixed performance tier on $driveLetter." -ForegroundColor Green
           } catch {
@@ -115,7 +118,17 @@ jobs:
           Write-Host "::endgroup::"
 
           # 2. HARDENED TELEMETRY KILL: Neutralizing CompatTelRunner & DiagTrack
-          Write-Host "::group::Telemetry Hardening: Permanently Disabling Microsoft Data Collection"
+          Write-Host "::group::Telemetry Hardening: IFEO Master Block & Service Nullification"
+          
+          # IFEO BLACKHOLE: Redirect telemetry processes to systray.exe (harmless)
+          $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+          $blockers = @("CompatTelRunner.exe", "DeviceCensus.exe", "SgrmBroker.exe")
+          foreach ($app in $blockers) {
+              $appPath = "$ifeoBase\$app"
+              if (-not (Test-Path $appPath)) { New-Item -Path $appPath -Force | Out-Null }
+              Set-ItemProperty -Path $appPath -Name "Debugger" -Value "C:\Windows\System32\systray.exe" -Force
+          }
+          Write-Host "IFEO 'Blackhole' logic applied to Telemetry binaries."
           
           # Registry Kill
           $telemetryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
