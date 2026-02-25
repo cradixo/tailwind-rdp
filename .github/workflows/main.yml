@@ -78,8 +78,18 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           
           Write-Host "Optimizing Desktop UI: Forcing .ps1 files to execute natively on double-click..."
-          New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -ErrorAction SilentlyContinue | Out-Null
-          Set-ItemProperty -Path "HKCR:\Microsoft.PowerShellScript.1\Shell\Command" -Name "(default)" -Value '"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -WindowStyle Normal -File "%1"' -Force
+          
+          # Force Windows to inherently recognize the PowerShell Script class mapping
+          cmd.exe /c "assoc .ps1=Microsoft.PowerShellScript.1" | Out-Null
+          
+          # Target physical HKLM root and forcefully create the subdirectories if they are missing
+          $regPath = "HKLM:\SOFTWARE\Classes\Microsoft.PowerShellScript.1\Shell\Command"
+          if (-not (Test-Path $regPath)) {
+              New-Item -Path $regPath -Force | Out-Null
+          }
+          
+          # Safely assign the execution payload 
+          Set-ItemProperty -Path $regPath -Name "(default)" -Value '"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -WindowStyle Normal -File "%1"' -Force
 
       - name: Provision Local Administrator Account
         run: |
@@ -427,7 +437,6 @@ jobs:
           Unregister-ScheduledTask -TaskName "RDPIdleMonitor" -Confirm:$false -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           
-          # Explicit multi-line structure to prevent ParseException missing brace error
           if (Test-Path "$stateRepo\.git\index.lock") { 
               Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue 
           }
