@@ -220,15 +220,21 @@ jobs:
               '',
               '$SyncRegistryMap = @{',
               '    "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"',
+              '    "Personalize.reg"      = "Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"',
               '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
               '    "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"',
+              '    "Taskband.reg"         = "Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"',
+              '    "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"',
+              '    "Accent.reg"           = "Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"',
               '    "DWM.reg"              = "Software\Microsoft\Windows\DWM"',
               '    "Desktop.reg"          = "Control Panel\Desktop"',
+              '    "Colors.reg"           = "Control Panel\Colors"',
               '}',
               '',
               '$SyncFolderMap = @{',
               '    "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"',
               '    "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
+              '    "PinnedTaskbar"      = "$profilePath\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"',
               '}'
           )
           
@@ -262,11 +268,14 @@ jobs:
               '}',
               '',
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
-              'git add "$osPrefix/Registry/*.reg"',
-              'git add "$osPrefix/Files/*"',
+              'git config user.name "RDP Manual Agent"',
+              'git config user.email "agent@rdp.local"',
+              'git add -A',
               '$staged = git diff --cached --name-only',
               'if ($staged) {',
               '    git commit -m "Manual Backup (Windows) $(Get-Date -Format ''HH:mm:ss'')"',
+              '    git pull origin main --rebase --quiet 2>&1',
+              '    if ($LASTEXITCODE -ne 0) { git rebase --abort 2>$null; git pull origin main --strategy-option=theirs --quiet 2>&1 }',
               '    git push origin main',
               '    Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
               '} else {',
@@ -282,8 +291,11 @@ jobs:
               'Set-Location $stateRepo',
               '',
               'Write-Host "Pulling latest state from Database (GitHub)..."',
+              'git config user.name "RDP Restore Agent"',
+              'git config user.email "agent@rdp.local"',
               'git reset --hard HEAD',
-              'git pull origin main --rebase --strategy-option=theirs',
+              'git pull origin main --rebase --quiet 2>&1',
+              'if ($LASTEXITCODE -ne 0) { git rebase --abort 2>$null; git pull origin main --strategy-option=theirs --quiet 2>&1 }',
               '',
               'Write-Host "Restoring physical assets..."',
               'foreach ($folder in $SyncFolderMap.Keys) {',
@@ -356,7 +368,8 @@ jobs:
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
-              '    git pull origin main --rebase --strategy-option=theirs --quiet',
+              '    git pull origin main --rebase --quiet 2>&1',
+              '    if ($LASTEXITCODE -ne 0) { git rebase --abort 2>$null; git pull origin main --strategy-option=theirs --quiet 2>&1 }',
               '    ',
               '    if (-not (Test-Path "$stateRepo\$osPrefix\Registry")) { New-Item -Path "$stateRepo\$osPrefix\Registry" -ItemType Directory -Force | Out-Null }',
               '    if (-not (Test-Path "$stateRepo\$osPrefix\Files")) { New-Item -Path "$stateRepo\$osPrefix\Files" -ItemType Directory -Force | Out-Null }',
@@ -368,14 +381,15 @@ jobs:
               '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    ',
-              '    git add "$osPrefix/Registry/*.reg"',
-              '    git add "$osPrefix/Files/*"',
+              '    git add -A',
               '    $staged = git diff --cached --name-only',
               '    if ($staged) {',
               '        git commit -m "Auto-save Settings (Windows) $(Get-Date -Format ''HH:mm:ss'')" --quiet',
+              '        git pull origin main --rebase --quiet 2>&1',
+              '        if ($LASTEXITCODE -ne 0) { git rebase --abort 2>$null; git pull origin main --strategy-option=theirs --quiet 2>&1 }',
               '        git push origin main --quiet',
-              '        Write-Log "Delta synchronized."
-              }',
+              '        Write-Log "Delta synchronized."',
+              '    }',
               '    Start-Sleep -Seconds 300',
               '}'
           )
@@ -649,6 +663,7 @@ jobs:
                   Set-Location $stateRepo
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
+                  $osPrefix = "Windows"
                   
                   $profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath
                   if ([string]::IsNullOrWhiteSpace($profilePath)) { 
@@ -657,14 +672,20 @@ jobs:
                   
                   $SyncRegistryMap = @{
                       "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
+                      "Personalize.reg"      = "Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
                       "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
                       "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
+                      "Taskband.reg"         = "Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"
+                      "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"
+                      "Accent.reg"           = "Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"
                       "DWM.reg"              = "Software\Microsoft\Windows\DWM"
                       "Desktop.reg"          = "Control Panel\Desktop"
+                      "Colors.reg"           = "Control Panel\Colors"
                   }
                   $SyncFolderMap = @{
                       "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"
                       "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"
+                      "PinnedTaskbar"      = "$profilePath\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
                   }
                   
                   if (-not (Test-Path "$stateRepo\$osPrefix\Registry")) { 
@@ -686,8 +707,7 @@ jobs:
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
-                  git add "$osPrefix/Registry/*.reg"
-                  git add "$osPrefix/Files/*"
+                  git add -A
                   
                   $staged = git diff --cached --name-only
                   if ($staged) {
@@ -698,8 +718,13 @@ jobs:
                   }
                   
                   Write-Host "Synchronizing with Database (Remote Repository)..."
-                  git pull origin main --rebase --strategy-option=theirs --quiet
-                  git push origin main --quiet
+                  git pull origin main --rebase --quiet 2>&1
+                  if ($LASTEXITCODE -ne 0) {
+                      Write-Host "Rebase failed, attempting merge fallback..."
+                      git rebase --abort 2>$null
+                      git pull origin main --strategy-option=theirs --quiet 2>&1
+                  }
+                  git push origin main --quiet 2>&1
                   
                   if ($LASTEXITCODE -eq 0) { 
                       Write-Host "Volatile state synchronized successfully." 
