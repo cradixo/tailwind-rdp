@@ -531,13 +531,14 @@ jobs:
                       $taskRunning = $true 
                   }
                   
-                  # Verify RDP network layer OR Interactive LogOn Trigger Execution
                   if (($qwinsta -match "rdp-tcp#.*Active") -or $taskRunning) {
                       $isLoggedIn = $true
                       Write-Host "`n[SUCCESS] RDP Connection established. Handing over idle monitoring to interactive daemon..." -ForegroundColor Green
-                  Write-Host "`n[ALERT] Pre-Login Timeout Reached! No RDP connection was established within ${{ env.IDLE_TIMEOUT_MIN }} minutes." -ForegroundColor Yellow
-                  Write-Host "::notice::Workflow completion triggered by Idle Timeout (Pre-Login)."
-                  break
+                  } elseif (((Get-Date) - $startTime).TotalSeconds -gt $idleTimeoutSeconds) {
+                      Write-Host "`n[ALERT] Pre-Login Timeout Reached! No RDP connection was established within ${{ env.IDLE_TIMEOUT_MIN }} minutes." -ForegroundColor Yellow
+                      Write-Host "::notice::Workflow completion triggered by Idle Timeout (Pre-Login)."
+                      break
+                  }
               }
               
               # Phase 2: Post-Login Idle Monitor (Receives drop-flag from Session 1 WinSta0)
