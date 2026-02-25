@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 env:
   RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
@@ -50,7 +51,9 @@ jobs:
           }
           
           if ($fallback) {
-              if (Test-Path "C:\state-repo") { Remove-Item -Path "C:\state-repo" -Recurse -Force -ErrorAction SilentlyContinue }
+              if (Test-Path "C:\state-repo") { 
+                  Remove-Item -Path "C:\state-repo" -Recurse -Force -ErrorAction SilentlyContinue 
+              }
               Write-Host "Cloning fallback state database: $env:LOCAL_REPO"
               
               $localRepoUrl = "https://x-access-token:$($env:NATIVE_TOKEN)@github.com/$env:LOCAL_REPO.git"
@@ -69,10 +72,14 @@ jobs:
           
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
-      - name: Configure Remote Desktop Services & Firewall Policies
+      - name: Configure Remote Desktop Services & UI Policies
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          Write-Host "Optimizing Desktop UI: Forcing .ps1 files to execute natively on double-click..."
+          New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path "HKCR:\Microsoft.PowerShellScript.1\Shell\Command" -Name "(default)" -Value '"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -WindowStyle Normal -File "%1"' -Force
 
       - name: Provision Local Administrator Account
         run: |
@@ -118,7 +125,7 @@ jobs:
             '}'
           )
           
-          # 1. MANUAL BACKUP SCRIPT (Reverted strictly to Original Layout)
+          # 1. MANUAL BACKUP SCRIPT
           $backupScript = $elevationCheck + $DataMaps + @(
               'Write-Host "Forcing Manual Backup to Remote Database..." -ForegroundColor Green',
               'Set-Location $stateRepo',
@@ -152,7 +159,7 @@ jobs:
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # 2. MANUAL RESTORE SCRIPT (Reverted to Original Layout + Flicker Bypass)
+          # 2. MANUAL RESTORE SCRIPT
           $restoreScript = $elevationCheck + $DataMaps + @(
               'Write-Host "Forcing Manual Restore from Database..." -ForegroundColor Yellow',
               'Set-Location $stateRepo',
@@ -177,22 +184,7 @@ jobs:
               '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '    }',
               '    ',
-              '    Write-Host "Invoking Desktop Window Manager (Theme Engine)..."',
-              '    try {',
-              '        $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
-              '        if ($regKey) {',
-              '            $themePath = $regKey.GetValue("CurrentTheme")',
-              '            if ($themePath -and (Test-Path $themePath)) {',
-              '                # DISABLED: Executing .theme natively forces Windows to transition through the Default (D) theme.',
-              '                # Start-Process -FilePath $themePath',
-              '                # Start-Sleep -Seconds 3',
-              '                # Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue',
-              '                Write-Host "Bypassed native Settings payload to prevent DWM flicker." -ForegroundColor Gray',
-              '            }',
-              '        }',
-              '    } catch { Write-Host "Failed to invoke theme automatically." }',
-              '    ',
-              '    Write-Host "Restarting Explorer to finalize UI elements..."',
+              '    Write-Host "Restarting Explorer to finalize UI elements without Settings app flicker..."',
               '    Stop-Process -Name explorer -Force',
               '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
               '} else {',
@@ -229,17 +221,6 @@ jobs:
               '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
               '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '        }',
-              '        try {',
-              '            $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
-              '            if ($regKey) {',
-              '                $themePath = $regKey.GetValue("CurrentTheme")',
-              '                if ($themePath -and (Test-Path $themePath)) {',
-              '                    # Start-Process -FilePath $themePath',
-              '                    # Start-Sleep -Seconds 3',
-              '                    # Stop-Process -Name "SystemSettings" -Force -ErrorAction SilentlyContinue',
-              '                }',
-              '            }',
-              '        } catch { Write-Log "Theme invoke failed." }',
               '        Stop-Process -Name explorer -Force',
               '        Write-Log "Restoration Complete."',
               '    }',
@@ -302,11 +283,11 @@ jobs:
           $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
           Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
 
-      - name: Deploy Save-Runtime Idle Monitor
+      - name: Deploy Save-Runtime Inactivity Monitor
         if: ${{ env.SAVE_RUNTIME == 'true' }}
         shell: powershell
         run: |
-          Write-Host "Enabling Save-Runtime Idle Monitor..."
+          Write-Host "Enabling Save-Runtime Hardware Idle Monitor..."
           
           $idleDaemon = @(
               'Add-Type @"',
@@ -334,7 +315,10 @@ jobs:
               '    if ($idle -gt $idleTimeoutMs) {',
               '        $wsh = New-Object -ComObject WScript.Shell',
               '        $btn = $wsh.Popup("Idle Timeout (15m). Shutdown in 60s.`n`nClick OK to stay.", 60, "Save Runtime", 48)',
-              '        if ($btn -eq -1) { New-Item "C:\state-repo\end_run.flag" -Force | Out-Null; exit }',
+              '        if ($btn -eq -1) { ',
+              '            New-Item "C:\state-repo\end_run.flag" -Force | Out-Null',
+              '            exit ',
+              '        }',
               '    }',
               '}'
           )
@@ -346,8 +330,13 @@ jobs:
           $toggleScript = @(
               '$flag = "C:\state-repo\idle_disabled.flag"',
               '$wshell = New-Object -ComObject Wscript.Shell',
-              'if (Test-Path $flag) { Remove-Item $flag -Force; $wshell.Popup("Auto-Shutdown ENABLED.", 4, "Status", 64) | Out-Null }',
-              'else { New-Item $flag -ItemType File -Force | Out-Null; $wshell.Popup("Auto-Shutdown DISABLED.", 4, "Status", 48) | Out-Null }'
+              'if (Test-Path $flag) { ',
+              '    Remove-Item $flag -Force',
+              '    $wshell.Popup("Auto-Shutdown ENABLED. System will monitor inactivity.", 4, "Status", 64) | Out-Null ',
+              '} else { ',
+              '    New-Item $flag -ItemType File -Force | Out-Null',
+              '    $wshell.Popup("Auto-Shutdown DISABLED. Inactivity monitor bypassed.", 4, "Status", 48) | Out-Null ',
+              '}'
           )
           $toggleScript | Out-File "C:\state-repo\Toggle-AutoShutdown.ps1" -Encoding UTF8
 
@@ -392,6 +381,8 @@ jobs:
 
       - name: Invoke Interactive Session Shell & Stream Diagnostics
         shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Write-Host "================ SECURE VPN ENTRY ================"
           Write-Host "Routing IP : $env:TAILSCALE_IP"
@@ -405,7 +396,8 @@ jobs:
           
           while ((Get-Date) -lt $endTime) {
               if (Test-Path "C:\state-repo\end_run.flag") {
-                  Write-Host "`n[ALERT] User Idle Timeout Reached! Breaking session loop to save runner minutes..." -ForegroundColor Yellow
+                  Write-Host "`n[ALERT] User Idle Timeout Reached! Canceling workflow via GH CLI to save runner minutes..." -ForegroundColor Yellow
+                  gh run cancel ${{ github.run_id }}
                   break
               }
               
@@ -434,4 +426,79 @@ jobs:
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "RDPIdleMonitor" -Confirm:$false -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
-          if (Test-Path "$stateRepo\.git\index.lock") {
+          
+          # Explicit multi-line structure to prevent ParseException missing brace error
+          if (Test-Path "$stateRepo\.git\index.lock") { 
+              Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue 
+          }
+
+          try {
+              $targetUser = "${{ env.RDP_USER }}"
+              $User = New-Object System.Security.Principal.NTAccount($targetUser)
+              $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
+              
+              if (Test-Path "Registry::HKEY_USERS\$sid") {
+                  Write-Host "Saving final state for SID: $sid"
+                  Set-Location $stateRepo
+                  git config user.name "Emergency Agent"
+                  git config user.email "agent@rdp.local"
+                  
+                  $profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath
+                  if ([string]::IsNullOrWhiteSpace($profilePath)) { 
+                      $profilePath = "C:\Users\$targetUser" 
+                  }
+                  
+                  $SyncRegistryMap = @{
+                      "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
+                      "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                      "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
+                      "DWM.reg"              = "Software\Microsoft\Windows\DWM"
+                      "Desktop.reg"          = "Control Panel\Desktop"
+                  }
+                  $SyncFolderMap = @{
+                      "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"
+                      "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"
+                  }
+                  
+                  if (-not (Test-Path "$stateRepo\Registry")) { 
+                      New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null 
+                  }
+                  if (-not (Test-Path "$stateRepo\Files")) { 
+                      New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null 
+                  }
+                  
+                  foreach ($key in $SyncRegistryMap.Keys) {
+                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null
+                  }
+                  
+                  foreach ($folder in $SyncFolderMap.Keys) {
+                      $dest = "$stateRepo\Files\$folder"
+                      if (-not (Test-Path $dest)) { 
+                          New-Item -Path $dest -ItemType Directory -Force | Out-Null 
+                      }
+                      Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+
+                  git add Registry/*.reg
+                  git add Files/*
+                  
+                  if (git status --porcelain) {
+                      Write-Host "Changes detected, committing locally..."
+                      git commit -m "Emergency Save (VM Shutdown) $(Get-Date -Format 'HH:mm:ss')" --quiet
+                  } else { 
+                      Write-Host "No local changes detected." 
+                  }
+                  
+                  Write-Host "Synchronizing with Database (Remote Repository)..."
+                  git pull origin main --rebase --quiet
+                  git push origin main --quiet
+                  
+                  if ($LASTEXITCODE -eq 0) { 
+                      Write-Host "Volatile state synchronized successfully." 
+                  } else { 
+                      Write-Host "Warning: Remote synchronization failed (Code $LASTEXITCODE)." 
+                  }
+              }
+          } catch { 
+              Write-Host "Teardown Exception: $($_.Exception.Message)" 
+          }
