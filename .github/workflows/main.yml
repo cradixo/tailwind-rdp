@@ -10,8 +10,8 @@ permissions:
 env:
   RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
-  SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'true' }}
-  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '2' }}
+  SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'false' }}
+  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '15' }}
 
 jobs:
   secure-rdp:
@@ -318,7 +318,7 @@ jobs:
               'public class IdleTime {',
               '[StructLayout(LayoutKind.Sequential)]',
               '    struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }',
-              '    [DllImport("user32.dll")]',
+              '[DllImport("user32.dll")]',
               '    static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);',
               '    public static uint GetIdle() {',
               '        LASTINPUTINFO info = new LASTINPUTINFO();',
@@ -427,7 +427,16 @@ jobs:
               
               # Phase 1: Pre-Login Idle Monitor (Executes strictly in Session 0)
               if ($saveRuntimeEnabled -and -not $isLoggedIn) {
-                  if (Get-Process explorer -ErrorAction SilentlyContinue) {
+                  $qwinsta = qwinsta 2>&1 | Out-String
+                  $taskRunning = $false
+                  
+                  $syncTask = Get-ScheduledTask -TaskName "RDPStateSync" -ErrorAction SilentlyContinue
+                  if ($syncTask -and $syncTask.State -eq 'Running') { 
+                      $taskRunning = $true 
+                  }
+                  
+                  # Verify RDP network layer OR Interactive LogOn Trigger Execution
+                  if (($qwinsta -match "rdp-tcp#.*Active") -or $taskRunning) {
                       $isLoggedIn = $true
                       Write-Host "`n[SUCCESS] RDP Connection established. Handing over idle monitoring to interactive daemon..." -ForegroundColor Green
                   } elseif (((Get-Date) - $startTime).TotalSeconds -gt $idleTimeoutSeconds) {
