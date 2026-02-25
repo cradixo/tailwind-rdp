@@ -1,4 +1,4 @@
-name: RDP-Inter-Persistent-Final
+name: RDP-Static-Persistent-Final
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ env:
   RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
   SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'false' }}
+  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '15' }}
 
 jobs:
   secure-rdp:
@@ -61,7 +62,7 @@ jobs:
               
               if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) { 
                   if (-not [string]::IsNullOrWhiteSpace($env:NATIVE_TOKEN)) {
-                      $localCloneOutput = $localCloneOutput -replace [regex]::Escape($env:NATIVE_TOKEN), "***"
+                      $localCloneOutput = $localCloneOutput -replace[regex]::Escape($env:NATIVE_TOKEN), "***"
                   }
                   Write-Host "Git Diagnostic Output: $localCloneOutput" -ForegroundColor Red
                   Write-Error "CRITICAL: Fallback architecture failed."
@@ -82,14 +83,23 @@ jobs:
           # Force Windows to inherently recognize the PowerShell Script class mapping
           cmd.exe /c "assoc .ps1=Microsoft.PowerShellScript.1" | Out-Null
           
-          # Target physical HKLM root and forcefully create the subdirectories if they are missing
-          $regPath = "HKLM:\SOFTWARE\Classes\Microsoft.PowerShellScript.1\Shell\Command"
-          if (-not (Test-Path $regPath)) {
-              New-Item -Path $regPath -Force | Out-Null
-          }
+          $psExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $cmdString = "`"$psExe`" -ExecutionPolicy Bypass -WindowStyle Normal -File `"%1`""
           
-          # Safely assign the execution payload 
-          Set-ItemProperty -Path $regPath -Name "(default)" -Value '"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -WindowStyle Normal -File "%1"' -Force
+          $shellPath = "HKLM:\SOFTWARE\Classes\Microsoft.PowerShellScript.1\Shell"
+          $openPath = "$shellPath\Open\Command"
+          $runPath = "$shellPath\0\Command"
+          
+          # Safely construct the physical registry paths to prevent missing-path exceptions
+          if (-not (Test-Path $openPath)) { New-Item -Path $openPath -Force | Out-Null }
+          if (-not (Test-Path $runPath)) { New-Item -Path $runPath -Force | Out-Null }
+          
+          # Override both the legacy "Open" verb and the modern "0" (Run) verb with the Bypass argument
+          Set-ItemProperty -Path $openPath -Name "(default)" -Value $cmdString -Force
+          Set-ItemProperty -Path $runPath -Name "(default)" -Value $cmdString -Force
+          
+          # Set the default double-click action explicitly to the Run verb
+          Set-ItemProperty -Path $shellPath -Name "(default)" -Value "0" -Force
 
       - name: Provision Local Administrator Account
         run: |
@@ -297,7 +307,7 @@ jobs:
         if: ${{ env.SAVE_RUNTIME == 'true' }}
         shell: powershell
         run: |
-          Write-Host "Enabling Save-Runtime Hardware Idle Monitor..."
+          Write-Host "Enabling Save-Runtime Hardware Idle Monitor (Timeout: ${{ env.IDLE_TIMEOUT_MIN }} minutes)..."
           
           $idleDaemon = @(
               'Add-Type @"',
@@ -317,14 +327,14 @@ jobs:
               '}',
               '"@',
               '',
-              '$idleTimeoutMs = 15 * 60 * 1000',
+              '$idleTimeoutMs = ${{ env.IDLE_TIMEOUT_MIN }} * 60 * 1000',
               'while($true) {',
               '    Start-Sleep -Seconds 10',
               '    if (Test-Path "C:\state-repo\idle_disabled.flag") { continue }',
               '    $idle = [IdleTime]::GetIdle()',
               '    if ($idle -gt $idleTimeoutMs) {',
               '        $wsh = New-Object -ComObject WScript.Shell',
-              '        $btn = $wsh.Popup("Idle Timeout (15m). Shutdown in 60s.`n`nClick OK to stay.", 60, "Save Runtime", 48)',
+              '        $btn = $wsh.Popup("Idle Timeout (${{ env.IDLE_TIMEOUT_MIN }}m). Shutdown in 60s.`n`nClick OK to stay.", 60, "Save Runtime", 48)',
               '        if ($btn -eq -1) { ',
               '            New-Item "C:\state-repo\end_run.flag" -Force | Out-Null',
               '            exit ',
