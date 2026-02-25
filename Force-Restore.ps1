@@ -1,4 +1,4 @@
-# --- SELF-ELEVATION GUARD ---
+# --- SELF-ELEVATION GUARD: Check for Admin rights and re-launch if necessary ---
 $currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`"";
@@ -21,7 +21,9 @@ if (Test-Path "$stateRepo\Registry") {
         Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait
     }
     Write-Host "Restarting Explorer to apply changes..."
-    Stop-Process -Name explorer -Force
+    taskkill /F /IM explorer.exe | Out-Null
+    Start-Sleep -Seconds 1
+    Start-Process explorer.exe
     Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan
 } else {
     Write-Host "No registry backup found in repository!" -ForegroundColor Red

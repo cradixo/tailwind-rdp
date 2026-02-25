@@ -21,7 +21,7 @@ if (-not (Test-Path $restoredFlag)) {
             $content | Out-File -FilePath $_.FullName -Encoding Unicode
             Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait
         }
-        Stop-Process -Name explorer -Force
+        taskkill /F /IM explorer.exe | Out-Null
         Write-Log "Restoration Complete."
     }
     New-Item -Path $restoredFlag -ItemType File | Out-Null
@@ -45,8 +45,6 @@ while ($true) {
         git commit -m "$msg" 2>&1 | Out-Null
         git push origin main 2>&1
         Write-Log "Push Complete."
-    } else {
-        Write-Log "No setting changes detected."
-    }
+    } else { Write-Log "No setting changes detected." }
     Start-Sleep -Seconds 300
 }

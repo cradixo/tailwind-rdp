@@ -1,4 +1,4 @@
-# --- SELF-ELEVATION GUARD ---
+# --- SELF-ELEVATION GUARD: Check for Admin rights and re-launch if necessary ---
 $currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`"";
