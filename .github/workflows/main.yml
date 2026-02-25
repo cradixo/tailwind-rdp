@@ -44,6 +44,31 @@ jobs:
         run: |
           $agentPath = "C:\state-repo\StateSync.ps1"
           
+          # --- COMMON DECLARATIONS (Injected into scripts for scalability) ---
+          # This allows easy future upgrades. Just add to these arrays.
+          $DataMaps = @(
+              '$targetUser = ''cardersparadox''',
+              '$userDir = "C:\Users\$targetUser"',
+              '$stateRepo = ''C:\state-repo''',
+              '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
+              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
+              '',
+              '# [SCHEMA UPGRADE ROOM] Add new registry keys to backup here:',
+              '$SyncRegistryMap = @{',
+              '    "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"',
+              '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
+              '    "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"',
+              '    "DWM.reg"              = "Software\Microsoft\Windows\DWM"',
+              '    "Desktop.reg"          = "Control Panel\Desktop"',
+              '}',
+              '',
+              '#[SCHEMA UPGRADE ROOM] Add new folders to backup here:',
+              '$SyncFolderMap = @{',
+              '    "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"',
+              '    "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"',
+              '}'
+          )
+          
           # --- SELF-ELEVATION GUARD CLAUSE ---
           $elevationCheck = @(
             '# --- SELF-ELEVATION GUARD ---',
@@ -54,31 +79,29 @@ jobs:
             '}'
           )
           
-          # 1. CREATE ROBUST, ATOMIC MANUAL TOOLS
-          # Note: Backup now copies physical LocalAppData & AppData files and uses root Themes registry key.
-          $backupScript = $elevationCheck + @(
-              '$stateRepo = ''C:\state-repo''',
-              '$targetUser = ''cardersparadox''',
-              '$userDir = "C:\Users\$targetUser"',
-              '$ThemesLocalAppData = "$userDir\AppData\Local\Microsoft\Windows\Themes"',
-              '$ThemesAppData = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"',
+          # 1. MANUAL BACKUP SCRIPT
+          $backupScript = $elevationCheck + $DataMaps + @(
               'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location $stateRepo',
-              '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
-              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
-              'Write-Host "Exporting current settings for SID: $sid..."',
+              '',
+              '# --- 1. CAPTURE STATE ---',
               'if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
-              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes" "$stateRepo\Registry\Themes.reg" /y',
-              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
-              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
-              'reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
-              'reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
-              'Write-Host "Backing up physical theme files..."',
-              'if (-not (Test-Path "$stateRepo\Files\LocalAppDataThemes")) { New-Item -Path "$stateRepo\Files\LocalAppDataThemes" -ItemType Directory -Force | Out-Null }',
-              'if (-not (Test-Path "$stateRepo\Files\AppDataThemes")) { New-Item -Path "$stateRepo\Files\AppDataThemes" -ItemType Directory -Force | Out-Null }',
-              'Copy-Item -Path "$ThemesLocalAppData\*" -Destination "$stateRepo\Files\LocalAppDataThemes" -Recurse -Force -ErrorAction SilentlyContinue',
-              'Copy-Item -Path "$ThemesAppData\*" -Destination "$stateRepo\Files\AppDataThemes" -Recurse -Force -ErrorAction SilentlyContinue',
-              'Write-Host "Committing and Pushing to GitHub..."',
+              'if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
+              '',
+              'Write-Host "Exporting dynamic registry mapping..."',
+              'foreach ($key in $SyncRegistryMap.Keys) {',
+              '    reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null',
+              '}',
+              '',
+              'Write-Host "Backing up dynamic directory mapping..."',
+              'foreach ($folder in $SyncFolderMap.Keys) {',
+              '    $dest = "$stateRepo\Files\$folder"',
+              '    if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
+              '    Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
+              '}',
+              '',
+              '# --- 2. DATABASE (SOURCE CONTROL) SYNC ---',
+              'Write-Host "Committing and Pushing to Database (GitHub)..."',
               'git add Registry/*.reg',
               'git add Files/*',
               'if (git status --porcelain) {',
@@ -92,24 +115,25 @@ jobs:
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # Note: Restore now places files locally and invokes the `.theme` engine directly via DWM hook.
-          $restoreScript = $elevationCheck + @(
-              '$stateRepo = ''C:\state-repo''',
-              '$targetUser = ''cardersparadox''',
-              '$userDir = "C:\Users\$targetUser"',
-              '$ThemesLocalAppData = "$userDir\AppData\Local\Microsoft\Windows\Themes"',
-              '$ThemesAppData = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"',
+          # 2. MANUAL RESTORE SCRIPT
+          $restoreScript = $elevationCheck + $DataMaps + @(
               'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow',
               'Set-Location $stateRepo',
-              'Write-Host "Pulling latest settings from GitHub..."',
+              '',
+              '# --- 1. DATABASE (SOURCE CONTROL) SYNC ---',
+              'Write-Host "Pulling latest state from Database (GitHub)..."',
               'git reset --hard HEAD',
               'git pull origin main --rebase',
-              '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
-              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
-              'Write-Host "Restoring physical theme files..."',
-              'if (Test-Path "$stateRepo\Files\LocalAppDataThemes") { Copy-Item -Path "$stateRepo\Files\LocalAppDataThemes\*" -Destination $ThemesLocalAppData -Recurse -Force -ErrorAction SilentlyContinue }',
-              'if (Test-Path "$stateRepo\Files\AppDataThemes") { Copy-Item -Path "$stateRepo\Files\AppDataThemes\*" -Destination $ThemesAppData -Recurse -Force -ErrorAction SilentlyContinue }',
-              'Write-Host "Applying registry settings for SID: $sid..."',
+              '',
+              '# --- 2. APPLY STATE ---',
+              'Write-Host "Restoring physical assets..."',
+              'foreach ($folder in $SyncFolderMap.Keys) {',
+              '    if (Test-Path "$stateRepo\Files\$folder") {',
+              '        Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue',
+              '    }',
+              '}',
+              '',
+              'Write-Host "Applying registry map..."',
               'if (Test-Path "$stateRepo\Registry") {',
               '    Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
               '        $content = Get-Content $_.FullName',
@@ -117,7 +141,8 @@ jobs:
               '        $content | Out-File -FilePath $_.FullName -Encoding Unicode',
               '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '    }',
-              '    Write-Host "Invoking Theme Engine..."',
+              '    ',
+              '    Write-Host "Invoking Desktop Window Manager (Theme Engine)..."',
               '    try {',
               '        $regKey =[Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
               '        if ($regKey) {',
@@ -129,7 +154,8 @@ jobs:
               '            }',
               '        }',
               '    } catch { Write-Host "Failed to invoke theme automatically." }',
-              '    Write-Host "Restarting Explorer to finalize UI changes..."',
+              '    ',
+              '    Write-Host "Restarting Explorer to finalize UI elements..."',
               '    Stop-Process -Name explorer -Force',
               '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
               '} else {',
@@ -139,29 +165,26 @@ jobs:
           )
           $restoreScript | Out-File -FilePath "C:\state-repo\Force-Restore.ps1" -Encoding UTF8
 
-          # 2. THE MAIN BACKGROUND AGENT
+          # 3. BACKGROUND TELEMETRY AGENT
           $syncScript = @(
               'if ($env:USERNAME -ne "cardersparadox") { exit }',
               '$ErrorActionPreference = ''SilentlyContinue''',
-              '$stateRepo = ''C:\state-repo''',
-              '$logDir = "$stateRepo\Logs"',
-              '$logFile = "$logDir\SyncAgent.log"',
-              '$restoredFlag = "$env:TEMP\registry_restored.flag"',
-              '$targetUser = ''cardersparadox''',
-              '$userDir = "C:\Users\$targetUser"',
-              '$ThemesLocalAppData = "$userDir\AppData\Local\Microsoft\Windows\Themes"',
-              '$ThemesAppData = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"',
-              'if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }',
-              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; $logLine = "[$timestamp] $Message"; Out-File -FilePath $logFile -InputObject $logLine -Append -Encoding UTF8 }',
+              '$logFile = "C:\state-repo\Logs\SyncAgent.log"',
+              'if (-not (Test-Path "C:\state-repo\Logs")) { New-Item -Path "C:\state-repo\Logs" -ItemType Directory -Force | Out-Null }',
+              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "[$timestamp] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
+              '',
               'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }',
-              'Copy-Item "$stateRepo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
-              'Copy-Item "$stateRepo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
-              '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
-              '$sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value',
+              'Copy-Item "C:\state-repo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
+              'Copy-Item "C:\state-repo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force'
+          ) + $DataMaps + @(
               'Write-Log "=== AGENT STARTED: $sid ==="',
+              '$restoredFlag = "$env:TEMP\registry_restored.flag"',
+              '',
+              '# INITIAL AUTO-RESTORE ON LOGIN',
               'if (-not (Test-Path $restoredFlag)) {',
-              '    if (Test-Path "$stateRepo\Files\LocalAppDataThemes") { Copy-Item -Path "$stateRepo\Files\LocalAppDataThemes\*" -Destination $ThemesLocalAppData -Recurse -Force -ErrorAction SilentlyContinue }',
-              '    if (Test-Path "$stateRepo\Files\AppDataThemes") { Copy-Item -Path "$stateRepo\Files\AppDataThemes\*" -Destination $ThemesAppData -Recurse -Force -ErrorAction SilentlyContinue }',
+              '    foreach ($folder in $SyncFolderMap.Keys) {',
+              '        if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
+              '    }',
               '    if (Test-Path "$stateRepo\Registry") {',
               '        Write-Log "Found backup. Restoring..."',
               '        Get-ChildItem -Path "$stateRepo\Registry" -Filter "*.reg" | ForEach-Object { ',
@@ -186,38 +209,39 @@ jobs:
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
               '}',
+              '',
+              '# INFINITE SYNC LOOP',
               'while ($true) {',
               '    Set-Location $stateRepo',
               '    git config user.name "RDP Sync Agent"',
               '    git config user.email "agent@rdp.local"',
-              '    git pull origin main --rebase 2>&1 | Out-Null',
+              '    git pull origin main --rebase --quiet',
+              '    ',
               '    if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }',
-              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes" "$stateRepo\Registry\Themes.reg" /y',
-              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y',
-              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y',
-              '    reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y',
-              '    reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y',
-              '    if (-not (Test-Path "$stateRepo\Files\LocalAppDataThemes")) { New-Item -Path "$stateRepo\Files\LocalAppDataThemes" -ItemType Directory -Force | Out-Null }',
-              '    if (-not (Test-Path "$stateRepo\Files\AppDataThemes")) { New-Item -Path "$stateRepo\Files\AppDataThemes" -ItemType Directory -Force | Out-Null }',
-              '    Copy-Item -Path "$ThemesLocalAppData\*" -Destination "$stateRepo\Files\LocalAppDataThemes" -Recurse -Force -ErrorAction SilentlyContinue',
-              '    Copy-Item -Path "$ThemesAppData\*" -Destination "$stateRepo\Files\AppDataThemes" -Recurse -Force -ErrorAction SilentlyContinue',
+              '    if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }',
+              '    ',
+              '    foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null }',
+              '    foreach ($folder in $SyncFolderMap.Keys) {',
+              '        $dest = "$stateRepo\Files\$folder"',
+              '        if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
+              '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
+              '    }',
+              '    ',
               '    git add Registry/*.reg',
               '    git add Files/*',
               '    if (git status --porcelain) {',
               '        Write-Log "SETTINGS CHANGED. Committing..."',
-              '        $msg = "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')"',
-              '        git commit -m "$msg" 2>&1 | Out-Null',
-              '        git push origin main 2>&1',
+              '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
+              '        git push origin main --quiet',
               '        Write-Log "Push Complete."',
-              '    } else {',
-              '        Write-Log "No setting changes detected."',
-              '    }',
+              '    } else { Write-Log "No setting changes detected." }',
+              '    ',
               '    Start-Sleep -Seconds 300',
               '}'
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
 
-          # 3. REGISTER TASK WITH SYSTEM-LEVEL PRIVILEGES
+          # 4. REGISTER TASK WITH SYSTEM-LEVEL PRIVILEGES
           $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
           $trigger = New-ScheduledTaskTrigger -AtLogOn
           $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
@@ -255,7 +279,7 @@ jobs:
               if (Test-Path $logFile) {
                   $file = Get-Item $logFile
                   if ($file.Length -gt $lastPosition) {
-                      $fs = [System.IO.FileStream]::new($logFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                      $fs =[System.IO.FileStream]::new($logFile, [System.IO.FileMode]::Open,[System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
                       $fs.Seek($lastPosition,[System.IO.SeekOrigin]::Begin) | Out-Null
                       $reader =[System.IO.StreamReader]::new($fs)
                       while (-not $reader.EndOfStream) { Write-Host $reader.ReadLine() }
@@ -273,40 +297,72 @@ jobs:
           Write-Host "=== EMERGENCY TEARDOWN ==="
           $stateRepo = 'C:\state-repo'
           if (-not (Test-Path $stateRepo)) { exit 0 }
+          
+          # --- 0. NEUTRALIZE CONCURRENCY & LOCKS ---
+          Write-Host "Neutralizing Background Agents & Git Locks..."
+          Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          if (Test-Path "$stateRepo\.git\index.lock") { Remove-Item "$stateRepo\.git\index.lock" -Force -ErrorAction SilentlyContinue }
+
           try {
               $targetUser = "cardersparadox"
               $userDir = "C:\Users\$targetUser"
-              $ThemesLocalAppData = "$userDir\AppData\Local\Microsoft\Windows\Themes"
-              $ThemesAppData = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"
-              
               $User = New-Object System.Security.Principal.NTAccount($targetUser)
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
+              
               if (Test-Path "Registry::HKEY_USERS\$sid") {
                   Write-Host "Saving final state for SID: $sid"
                   Set-Location $stateRepo
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
-                  git reset --hard HEAD
-                  git pull origin main --rebase 2>&1 | Out-Null
+                  
+                  # --- 1. CAPTURE FINAL STATE VIA DYNAMIC MAPS ---
+                  # These maps ensure "room for upgrades" across all scenarios.
+                  $SyncRegistryMap = @{
+                      "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
+                      "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                      "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
+                      "DWM.reg"              = "Software\Microsoft\Windows\DWM"
+                      "Desktop.reg"          = "Control Panel\Desktop"
+                  }
+                  $SyncFolderMap = @{
+                      "LocalAppDataThemes" = "$userDir\AppData\Local\Microsoft\Windows\Themes"
+                      "AppDataThemes"      = "$userDir\AppData\Roaming\Microsoft\Windows\Themes"
+                  }
                   
                   if (-not (Test-Path "$stateRepo\Registry")) { New-Item -Path "$stateRepo\Registry" -ItemType Directory -Force | Out-Null }
-                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes" "$stateRepo\Registry\Themes.reg" /y
-                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
-                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" "$stateRepo\Registry\StuckRects3.reg" /y
-                  reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\DWM" "$stateRepo\Registry\DWM.reg" /y
-                  reg export "HKEY_USERS\$sid\Control Panel\Desktop" "$stateRepo\Registry\Desktop.reg" /y
+                  if (-not (Test-Path "$stateRepo\Files")) { New-Item -Path "$stateRepo\Files" -ItemType Directory -Force | Out-Null }
                   
-                  if (-not (Test-Path "$stateRepo\Files\LocalAppDataThemes")) { New-Item -Path "$stateRepo\Files\LocalAppDataThemes" -ItemType Directory -Force | Out-Null }
-                  if (-not (Test-Path "$stateRepo\Files\AppDataThemes")) { New-Item -Path "$stateRepo\Files\AppDataThemes" -ItemType Directory -Force | Out-Null }
-                  Copy-Item -Path "$ThemesLocalAppData\*" -Destination "$stateRepo\Files\LocalAppDataThemes" -Recurse -Force -ErrorAction SilentlyContinue
-                  Copy-Item -Path "$ThemesAppData\*" -Destination "$stateRepo\Files\AppDataThemes" -Recurse -Force -ErrorAction SilentlyContinue
+                  foreach ($key in $SyncRegistryMap.Keys) {
+                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\Registry\$key" /y | Out-Null
+                  }
+                  foreach ($folder in $SyncFolderMap.Keys) {
+                      $dest = "$stateRepo\Files\$folder"
+                      if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
+                      Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                  }
 
+                  # --- 2. DATABASE (SOURCE CONTROL) SYNC ---
+                  # Re-ordered: Add -> Commit Locally -> Pull (Merge) -> Push
+                  # Uses --quiet to suppress Git stderr streams and avoid false GitHub Action Exit Codes.
                   git add Registry/*.reg
                   git add Files/*
+                  
                   if (git status --porcelain) {
-                      git commit -m "Emergency Save" 2>&1 | Out-Null
-                      git push origin main 2>&1
-                      Write-Host "Emergency Backup Success."
-                  } else { Write-Host "No changes detected." }
+                      Write-Host "Changes detected, committing locally..."
+                      git commit -m "Emergency Save (VM Shutdown)" --quiet
+                  } else { 
+                      Write-Host "No local changes detected." 
+                  }
+                  
+                  Write-Host "Synchronizing with Database (Remote Repository)..."
+                  git pull origin main --rebase --quiet
+                  git push origin main --quiet
+                  
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host "Emergency Backup Complete and Successful."
+                  } else {
+                      Write-Host "Warning: Remote synchronization failed or reported exit code $LASTEXITCODE."
+                  }
               }
           } catch { Write-Host "Error: $($_.Exception.Message)" }
