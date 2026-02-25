@@ -166,9 +166,13 @@ jobs:
           $logDir = "C:\state-repo\Logs"; if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
           function Write-Log { param([string]$Message); "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Message" | Out-File -FilePath "$logDir\SyncDaemon.log" -Append -Encoding UTF8 }
           
+          # Wait for Desktop to exist (User Logon)
           while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
+          
+          # Deploy Client Tools to Desktop
           Copy-Item "C:\state-repo\Force-Backup.ps1" "$userDir\Desktop\Force-Backup.ps1" -Force
           Copy-Item "C:\state-repo\Force-Restore.ps1" "$userDir\Desktop\Force-Restore.ps1" -Force
+          if (Test-Path "C:\state-repo\Toggle-AutoShutdown.ps1") { Copy-Item "C:\state-repo\Toggle-AutoShutdown.ps1" "$userDir\Desktop\Toggle-AutoShutdown.ps1" -Force }
           
           Write-Log "Daemon Initialized for SID: $sid"
           $restoredFlag = "$env:TEMP\registry_restored.flag"
@@ -261,7 +265,7 @@ jobs:
                   }
               }
           "@
-          
+              
               $idleTimeoutMs = 15 * 60 * 1000 # 15 minutes
               while($true) {
                   Start-Sleep -Seconds 10
@@ -295,7 +299,8 @@ jobs:
                   $wshell.Popup("Auto-Shutdown is now DISABLED for this session.", 4, "Save Runtime", 48)
               }
           '@
-              $toggleScript | Out-File "C:\Users\${{ env.RDP_USER }}\Desktop\Toggle-AutoShutdown.ps1" -Encoding UTF8
+              # FIXED: Saving to C:\state-repo instead of User Desktop to avoid DirectoryNotFoundException
+              $toggleScript | Out-File "C:\state-repo\Toggle-AutoShutdown.ps1" -Encoding UTF8
           } else { Write-Host "Save-Runtime feature disabled via secret." }
 
       - name: Establish Tailscale VPN Mesh & Resolve Orphaned Nodes
