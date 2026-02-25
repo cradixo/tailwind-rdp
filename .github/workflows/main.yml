@@ -299,7 +299,6 @@ jobs:
                   $wshell.Popup("Auto-Shutdown is now DISABLED for this session.", 4, "Save Runtime", 48)
               }
           '@
-              # FIXED: Saving to C:\state-repo instead of User Desktop to avoid DirectoryNotFoundException
               $toggleScript | Out-File "C:\state-repo\Toggle-AutoShutdown.ps1" -Encoding UTF8
           } else { Write-Host "Save-Runtime feature disabled via secret." }
 
@@ -329,8 +328,18 @@ jobs:
           Start-Process -FilePath "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="$hostname"
           
-          $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 12) { $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim(); Start-Sleep -Seconds 5; $retries++ }
+          # FIXED: Safe, multi-step IP fetching loop to prevent null-value crash
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 24) {
+              $raw = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4)
+              if (-not [string]::IsNullOrWhiteSpace($raw) -and $raw -match "^100\.") {
+                  $tsIP = $raw.Trim()
+              } else {
+                  Start-Sleep -Seconds 5
+                  $retries++
+              }
+          }
           if (-not $tsIP) { Write-Error "Tailscale routing failed."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
