@@ -78,41 +78,70 @@ jobs:
 
       - name: Provision System Infrastructure & Performance Tiers
         run: |
-          # 1. PERFORMANCE TIER: Fixed Pagefile Allocation (Resolving 8GB RAM Bottleneck)
+          # 1. PERFORMANCE TIER: Fixed Pagefile Allocation (D: Drive Targeting)
           Write-Host "::group::Performance Tier: Optimizing Virtual Memory Subsystem"
           try {
-              Write-Host "Verifying disk capacity for Pagefile expansion..."
-              $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+              Write-Host "Verifying D: box capacity for Pagefile expansion..."
+              $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'"
+              if (-not $drive) { $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" }
+              
               $freeGB = $drive.FreeSpace / 1GB
-              Write-Host "Available Space: $([math]::Round($freeGB,2)) GB"
+              $driveLetter = $drive.DeviceID
+              Write-Host "Available Space on $driveLetter : $([math]::Round($freeGB,2)) GB"
               
               $targetSizeMB = 16384
-              if ($freeGB -lt 25) { 
-                  Write-Host "Warning: Low disk space detected ($([math]::Round($freeGB,2)) GB). Scaling pagefile to 8GB safety tier." -ForegroundColor Yellow
+              if ($freeGB -lt 20) { 
+                  Write-Host "Warning: Limited space. Scaling pagefile to 8GB safety tier." -ForegroundColor Yellow
                   $targetSizeMB = 8192
               }
 
               Write-Host "Disabling System-Managed Pagefile logic..."
               Set-CimInstance -Query "Select * from Win32_ComputerSystem" -Property @{AutomaticManagedPagefile=$False} -ErrorAction SilentlyContinue
               
-              Write-Host "Constructing fixed Performance Pagefile ($targetSizeMB MB)..."
-              $existingPageFile = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
-              if ($existingPageFile) { $existingPageFile | Remove-CimInstance -ErrorAction SilentlyContinue }
+              Write-Host "Constructing fixed Performance Pagefile on $driveLetter ($targetSizeMB MB)..."
+              $existingPageFiles = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
+              if ($existingPageFiles) { $existingPageFiles | Remove-CimInstance -ErrorAction SilentlyContinue }
               
               New-CimInstance -ClassName Win32_PageFileSetting -Property @{
-                  Name = "C:\pagefile.sys"
+                  Name = "$driveLetter\pagefile.sys"
                   MinimumSize = $targetSizeMB
                   MaximumSize = $targetSizeMB
               } -ErrorAction SilentlyContinue
               
-              Write-Host "Successfully provisioned fixed performance tier." -ForegroundColor Green
+              Write-Host "Successfully provisioned fixed performance tier on $driveLetter." -ForegroundColor Green
           } catch {
-              Write-Host "Warning: Pagefile optimization bypassed (WMI Access Denied or Pending Reboot)." -ForegroundColor Yellow
+              Write-Host "Warning: Pagefile optimization bypassed." -ForegroundColor Yellow
           }
           Write-Host "::endgroup::"
 
-          # 2. DEFENDER BYPASS: Whitelist C:\ to stop CPU usage without triggering "Tamper Protection" blocks
-          Write-Host "::group::Security Hardening: Neutralizing Real-Time Performance Impacts"
+          # 2. HARDENED TELEMETRY KILL: Neutralizing CompatTelRunner & DiagTrack
+          Write-Host "::group::Telemetry Hardening: Permanently Disabling Microsoft Data Collection"
+          
+          # Registry Kill
+          $telemetryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
+          if (-not (Test-Path $telemetryPath)) { New-Item -Path $telemetryPath -Force | Out-Null }
+          Set-ItemProperty -Path $telemetryPath -Name "AllowTelemetry" -Value 0 -Force
+          
+          # Task Scheduler Kill (Hard Hit)
+          Write-Host "Nuking Compatibility Appraiser Scheduled Tasks..."
+          $tasks = @(
+              "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+              "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+              "\Microsoft\Windows\Application Experience\StartupAppScan",
+              "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+              "\Microsoft\Windows\Customer Experience Improvement Program\Usbceip"
+          )
+          foreach ($t in $tasks) {
+              Disable-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue | Out-Null
+          }
+          
+          # Service Kill
+          Stop-Service -Name "DiagTrack" -Force -ErrorAction SilentlyContinue
+          Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
+          Write-Host "::endgroup::"
+
+          # 3. SECURITY HARDENING: Neutralizing Real-Time Performance Impacts
+          Write-Host "::group::Security Hardening: Anti-Virus Bypass"
           Write-Host "Optimizing CPU: Whitelisting entire C:\ drive to neutralize Defender Real-time Scan..."
           Add-MpPreference -ExclusionPath "C:\" -Force -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionProcess "git.exe" -Force -ErrorAction SilentlyContinue
@@ -389,18 +418,19 @@ jobs:
               'Start-Sleep -Seconds 5 # Give restoration a head start',
               '',
               '# B. SUBDUE SYSTEM BLOAT (DISK/CPU)',
-              '$bloatServices = @("WSearch", "SysMain", "UsoSvc", "DiagTrack", "FabricHostSvc", "LanmanWorkstation")',
+              '$bloatServices = @("WSearch", "SysMain", "UsoSvc", "DiagTrack", "FabricHostSvc", "LanmanWorkstation", "OneSyncSvc", "CDPSvc")',
               'foreach ($svc in $bloatServices) {',
               '    Write-Host "Stopping $svc..."',
               '    Stop-Service -Name $svc -Force',
               '    Set-Service -Name $svc -StartupType Disabled',
               '}',
               '',
-              '# C. SPECIFIC BLOAT TARGETS (FROM SCREENSHOT)',
-              'Write-Host "Cleaning background clutter..."',
-              '$targets = @("ServiceFabricLocalClusterManager", "SearchHost", "CompatTelRunner", "CompatTel", "RuntimeBroker")',
+              '# C. SPECIFIC BLOAT TARGETS (AGGRRESSIVE TELEMETRY KILL)',
+              'Write-Host "Cleaning background clutter & Telemetry Shims..."',
+              '$targets = @("ServiceFabricLocalClusterManager", "SearchHost", "CompatTelRunner", "CompatTel", "RuntimeBroker", "SgrmBroker", "DeviceCensus")',
               'foreach ($t in $targets) { ',
-              '    Stop-Process -Name $t -Force ',
+              '    Write-Host "Terminating $t..."',
+              '    Get-Process -Name $t -ErrorAction SilentlyContinue | Stop-Process -Force ',
               '}',
               '',
               '# D. PERFORMANCE ENFORCEMENT (Memory Trimming & Priority)',
