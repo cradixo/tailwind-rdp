@@ -78,51 +78,8 @@ jobs:
 
       - name: Provision System Infrastructure & Performance Tiers
         run: |
-          # 1. PERFORMANCE TIER: Nuclear Multi-Pagefile Allocation (Bypassing Azure 1920MB Lock)
-          Write-Host "::group::Performance Tier: Nuclear Virtual Memory Injection"
-          try {
-              Write-Host "Verifying D: box capacity for Secondary Pagefile..."
-              $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'"
-              if (-not $drive) { $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" }
-              
-              $driveLetter = $drive.DeviceID
-              $targetSizeMB = 16384
-              $extPagePath = "$driveLetter\pagefile_ext.sys"
-              
-              Write-Host "Action: Creating secondary 16GB fixed pagefile at $extPagePath"
-              
-              # A. Registry Hard-Overwrite for Persistence & VMM Recognition
-              $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
-              Set-ItemProperty -Path $regPath -Name "ExistingPageFiles" -Value @("\??\$extPagePath") -ErrorAction SilentlyContinue
-              
-              # B. Multi-String PagingFiles Append
-              $pagingFiles = @("$extPagePath $targetSizeMB $targetSizeMB")
-              # If we want to keep the original 1920MB as well (to avoid conflicts)
-              $pagingFiles += "D:\pagefile.sys 0 0" 
-              Set-ItemProperty -Path $regPath -Name "PagingFiles" -Value $pagingFiles -PropertyType MultiString -Force
-              
-              # C. Disable Automatic Management via Registry (Level 0)
-              Set-ItemProperty -Path $regPath -Name "AutomaticManagedPagefile" -Value 0 -PropertyType DWord -Force
-              
-              # D. Live Injection via CIM/WMI (Property Corrected: InitialSize)
-              $existing = Get-CimInstance Win32_PageFileSetting | Where-Object { $_.Name -like "*pagefile_ext.sys" }
-              if ($existing) { $existing | Remove-CimInstance -ErrorAction SilentlyContinue }
-              
-              New-CimInstance -ClassName Win32_PageFileSetting -Property @{
-                  Name = $extPagePath
-                  InitialSize = $targetSizeMB
-                  MaximumSize = $targetSizeMB
-              } -ErrorAction SilentlyContinue
-              
-              Write-Host "Nuclear Success: Secondary performance tier provisioned on $driveLetter." -ForegroundColor Green
-              Write-Host "System will now utilize $extPagePath (16GB) + existing pagefile."
-          } catch {
-              Write-Host "Warning: Nuclear injection encountered permission/driver locks." -ForegroundColor Yellow
-          }
-          Write-Host "::endgroup::"
-
-          # 2. HARDENED TELEMETRY KILL: Neutralizing CompatTelRunner & DiagTrack
-          Write-Host "::group::Telemetry Hardening: IFEO Master Block & Service Nullification"
+          # 1. TELEMETRY HARDENING: IFEO Master Block & Service Nullification
+          Write-Host "::group::Telemetry Hardening: Permanently Disabling Microsoft Data Collection"
           
           # IFEO BLACKHOLE: Redirect telemetry processes to systray.exe (harmless)
           $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
@@ -132,15 +89,13 @@ jobs:
               if (-not (Test-Path $appPath)) { New-Item -Path $appPath -Force | Out-Null }
               Set-ItemProperty -Path $appPath -Name "Debugger" -Value "C:\Windows\System32\systray.exe" -Force
           }
-          Write-Host "IFEO 'Blackhole' logic applied to Telemetry binaries."
           
-          # Registry Kill
+          # Policy level block
           $telemetryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
           if (-not (Test-Path $telemetryPath)) { New-Item -Path $telemetryPath -Force | Out-Null }
           Set-ItemProperty -Path $telemetryPath -Name "AllowTelemetry" -Value 0 -Force
           
           # Task Scheduler Kill (Hard Hit)
-          Write-Host "Nuking Compatibility Appraiser Scheduled Tasks..."
           $tasks = @(
               "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
               "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
@@ -157,7 +112,7 @@ jobs:
           Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
           Write-Host "::endgroup::"
 
-          # 3. SECURITY HARDENING: Neutralizing Real-Time Performance Impacts
+          # 2. SECURITY HARDENING: Neutralizing Real-Time Performance Impacts
           Write-Host "::group::Security Hardening: Anti-Virus Bypass"
           Write-Host "Optimizing CPU: Whitelisting entire C:\ drive to neutralize Defender Real-time Scan..."
           Add-MpPreference -ExclusionPath "C:\" -Force -ErrorAction SilentlyContinue
