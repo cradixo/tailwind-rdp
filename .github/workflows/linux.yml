@@ -99,20 +99,35 @@ jobs:
         run: |
           echo "::group::Package Installation"
           export DEBIAN_FRONTEND=noninteractive
+          export NEEDRESTART_MODE=a
+          
           # Using eatmydata to disable fsync during install for maximum speed
           sudo apt-get update -qq
           sudo apt-get install -y -qq eatmydata
           
+          # Install IceWM + xRDP + Firefox Binary dependencies + Utilities
           sudo eatmydata apt-get install -y --no-install-recommends \
-            icewm xrdp xorgxrdp x11-xserver-utils xterm zenity wget curl git htop
+            icewm xrdp xorgxrdp x11-xserver-utils xterm zenity wget curl git htop \
+            libgtk-3-0 libasound2 libdbus-glib-1-2 libx11-xcb1 libxcomposite1 \
+            libxdamage1 libxrandr2 libxtst6 bzip2 file
           
-          # Deploy Firefox Binary (Direct Download is faster than APT-PPA/Snap)
+          # Deploy Firefox Binary (Direct Download with verification)
           echo "Deploying Firefox Binary..."
           FF_URL="https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US"
-          wget -q -O firefox.tar.bz2 "$FF_URL"
-          sudo tar -xjf firefox.tar.bz2 -C /opt/
-          sudo ln -sf /opt/firefox/firefox /usr/local/bin/firefox
-          rm firefox.tar.bz2
+          if curl -L "$FF_URL" -o firefox.tar.bz2; then
+              if file firefox.tar.bz2 | grep -q "bzip2 compressed data"; then
+                  sudo tar -xjf firefox.tar.bz2 -C /opt/
+                  sudo ln -sf /opt/firefox/firefox /usr/local/bin/firefox
+                  echo "Firefox binary deployed successfully."
+              else
+                  echo "::error::Firefox download corrupted or redirected to HTML. Check URL."
+                  exit 1
+              fi
+          else
+              echo "::error::Failed to download Firefox binary."
+              exit 1
+          fi
+          rm -f firefox.tar.bz2
           echo "::endgroup::"
 
       # ═══════════════════════════════════════════════════════════════
