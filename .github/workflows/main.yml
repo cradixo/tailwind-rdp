@@ -12,9 +12,9 @@ env:
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
   SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'true' }}
   IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '3' }}
-  RDP_WIDTH: 1920
-  RDP_HEIGHT: 1080
-  RDP_BIT_DEPTH: 32  # Options: 16, 24, 32
+  RDP_WIDTH: ''     # e.g., 1920 (Blank for dynamic/best quality)
+  RDP_HEIGHT: ''    # e.g., 1080 (Blank for dynamic/best quality)
+  RDP_BIT_DEPTH: '' # e.g., 32 (Blank for dynamic/best quality)
 
 jobs:
   secure-rdp:
@@ -106,21 +106,35 @@ jobs:
           Write-Host "Optimizing Desktop UI & Latency..."
           cmd.exe /c "assoc .ps1=Microsoft.PowerShellScript.1" | Out-Null
           
-          # RDP: Set Resolution & Color Lock (Top-Level Configured)
-          Write-Host "Configuring RDP Quality: ${{ env.RDP_WIDTH }}x${{ env.RDP_HEIGHT }} at ${{ env.RDP_BIT_DEPTH }}-bit color..."
-          $dimPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          Set-ItemProperty -Path $dimPath -Name "DefaultRuntimeWidth" -Value ${{ env.RDP_WIDTH }} -Force
-          Set-ItemProperty -Path $dimPath -Name "DefaultRuntimeHeight" -Value ${{ env.RDP_HEIGHT }} -Force
+          # RDP: Optional Configuration (Defaults to Dynamic/Best Quality if empty)
+          if (-not [string]::IsNullOrWhiteSpace("${{ env.RDP_WIDTH }}") -and -not [string]::IsNullOrWhiteSpace("${{ env.RDP_HEIGHT }}")) {
+              Write-Host "Forcing RDP Resolution: ${{ env.RDP_WIDTH }}x${{ env.RDP_HEIGHT }}..."
+              $dimPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+              Set-ItemProperty -Path $dimPath -Name "DefaultRuntimeWidth" -Value ${{ env.RDP_WIDTH }} -Force
+              Set-ItemProperty -Path $dimPath -Name "DefaultRuntimeHeight" -Value ${{ env.RDP_HEIGHT }} -Force
+          } else {
+              Write-Host "RDP Resolution: Dynamic negotiation enabled (Best Quality)."
+          }
           
-          # Color Depth Registry (4 = 32-bit, 3 = 16-bit)
-          $cDepth = 4
-          if ("${{ env.RDP_BIT_DEPTH }}" -eq "16") { $cDepth = 3 }
-          Set-ItemProperty -Path $dimPath -Name "ColorDepth" -Value $cDepth -Force
+          if (-not [string]::IsNullOrWhiteSpace("${{ env.RDP_BIT_DEPTH }}")) {
+              Write-Host "Forcing Color Depth: ${{ env.RDP_BIT_DEPTH }}-bit..."
+              $cDepth = 4
+              if ("${{ env.RDP_BIT_DEPTH }}" -eq "16") { $cDepth = 3 }
+              
+              $dimPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+              Set-ItemProperty -Path $dimPath -Name "ColorDepth" -Value $cDepth -Force
+              
+              $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+              if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
+              Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value $cDepth -Force
+          } else {
+              Write-Host "Color Depth: Dynamic negotiation enabled (Best Quality)."
+          }
           
-          # Force resolution and bit-depth policy
+          # Force TCP for stability
           $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
-          Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value $cDepth -Force
+          Set-ItemProperty -Path $tsPath -Name "fClientDisableUDP" -Value 1 -Force
           
           $psExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
           $cmdString = "`"$psExe`" -ExecutionPolicy Bypass -WindowStyle Normal -File `"%1`""
