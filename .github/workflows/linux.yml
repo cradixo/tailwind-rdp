@@ -1,0 +1,884 @@
+name: Linux-XFCE-RDP-Persistent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  RDP_USER: ${{ secrets.RDP_USERNAME || 'RunnerAdmin' }}
+  RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
+  SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'true' }}
+  IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '3' }}
+
+jobs:
+  secure-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 1: PROVISION DISTRIBUTED STATE INFRASTRUCTURE
+      # ═══════════════════════════════════════════════════════════════
+      - name: Provision Distributed State Infrastructure (Primary/Fallback Routing)
+        env:
+          DB_PAT: ${{ secrets.BACKUP_DB_PAT }}
+          DB_USER: ${{ secrets.BACKUP_DB_USER }}
+          DB_REPO: ${{ secrets.BACKUP_DB_REPO }}
+          NATIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOCAL_REPO: ${{ github.repository }}
+        run: |
+          STATE_DIR="/opt/state-repo"
+          FALLBACK=false
+
+          if [ -z "$DB_PAT" ] || [ -z "$DB_USER" ] || [ -z "$DB_REPO" ]; then
+              echo "::warning::External database secrets missing. Routing to local repository..."
+              FALLBACK=true
+          else
+              echo "Authenticating to Primary Database: ${DB_USER}/${DB_REPO}"
+              REPO_URL="https://${DB_USER}:${DB_PAT}@github.com/${DB_USER}/${DB_REPO}.git"
+
+              if ! git clone -q "$REPO_URL" "$STATE_DIR" 2>/dev/null; then
+                  echo "::error::Access to primary database denied or repository empty. Routing to fallback..."
+                  FALLBACK=true
+              else
+                  echo "Primary database connection established."
+              fi
+          fi
+
+          if [ "$FALLBACK" = true ]; then
+              rm -rf "$STATE_DIR" 2>/dev/null || true
+              echo "Cloning fallback state database: ${LOCAL_REPO}"
+              LOCAL_URL="https://x-access-token:${NATIVE_TOKEN}@github.com/${LOCAL_REPO}.git"
+
+              if ! git clone -q "$LOCAL_URL" "$STATE_DIR" 2>/dev/null; then
+                  echo "::error::CRITICAL: Fallback architecture failed."
+                  exit 1
+              fi
+              echo "Fallback database connection established."
+          fi
+
+          sudo chmod -R 777 "$STATE_DIR"
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 2: NUCLEAR DEBLOAT — RECLAIM RAM & CPU
+      # ═══════════════════════════════════════════════════════════════
+      - name: Nuclear System Debloat (Reclaim ~2GB RAM)
+        run: |
+          echo "::group::Phase 1: Service Annihilation"
+
+          # Kill unnecessary services — these exist on GitHub runners and eat RAM
+          KILL_SERVICES=(
+            snapd
+            fwupd
+            ModemManager
+            networkd-dispatcher
+            unattended-upgrades
+            apt-daily.service
+            apt-daily-upgrade.service
+            apt-daily.timer
+            apt-daily-upgrade.timer
+            motd-news.timer
+            e2scrub_all.timer
+            bluetooth.service
+            cups.service
+            cups-browsed.service
+            avahi-daemon.service
+            multipathd.service
+            iscsid.service
+            open-iscsi.service
+            irqbalance.service
+            pollinate.service
+            secureboot-db.service
+            ua-timer.timer
+            fwupd-refresh.timer
+          )
+
+          for svc in "${KILL_SERVICES[@]}"; do
+            sudo systemctl stop "$svc" 2>/dev/null || true
+            sudo systemctl disable "$svc" 2>/dev/null || true
+            sudo systemctl mask "$svc" 2>/dev/null || true
+          done
+          echo "::endgroup::"
+
+          echo "::group::Phase 2: Snap Eradication"
+          # Snap is a massive RAM hog — remove entirely
+          if command -v snap &>/dev/null; then
+            sudo snap list 2>/dev/null | awk 'NR>1 {print $1}' | while read pkg; do
+              sudo snap remove --purge "$pkg" 2>/dev/null || true
+            done
+            sudo apt-get purge -y snapd 2>/dev/null || true
+            sudo rm -rf /snap /var/snap /var/lib/snapd ~/snap 2>/dev/null || true
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Phase 3: Docker Daemon Kill"
+          # Docker is pre-installed on runners — we don't need it
+          sudo systemctl stop docker.service docker.socket containerd.service 2>/dev/null || true
+          sudo systemctl disable docker.service docker.socket containerd.service 2>/dev/null || true
+          sudo systemctl mask docker.service docker.socket containerd.service 2>/dev/null || true
+          echo "::endgroup::"
+
+          echo "::group::Phase 4: Process Cleanup"
+          # Kill background agents that waste CPU
+          KILL_PROCS=(
+            fwupd
+            ModemManager
+            multipathd
+            accounts-daemon
+            irqbalance
+            polkitd
+            unattended-upgrade
+          )
+          for proc in "${KILL_PROCS[@]}"; do
+            sudo pkill -f "$proc" 2>/dev/null || true
+          done
+          echo "::endgroup::"
+
+          echo "::group::Phase 5: Memory Reclaim"
+          # Drop filesystem caches to reclaim memory
+          sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+          # Aggressive swappiness — prefer RAM over swap
+          sudo sysctl -w vm.swappiness=10
+          echo "::endgroup::"
+
+          echo "RAM after debloat:"
+          free -h
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 3: INSTALL MINIMAL XFCE4 + xRDP + ESSENTIALS
+      # ═══════════════════════════════════════════════════════════════
+      - name: Install Minimal XFCE4 Desktop & xRDP
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo "::group::Package Installation"
+          sudo apt-get update -qq
+
+          # Core XFCE4 — minimal, no recommends (no games, no office, no media players)
+          sudo apt-get install -y --no-install-recommends \
+            xfce4 \
+            xfce4-terminal \
+            xfce4-settings \
+            xfce4-taskmanager \
+            dbus-x11 \
+            x11-xserver-utils \
+            xfonts-base \
+            xfonts-100dpi \
+            xfonts-75dpi \
+            fonts-dejavu-core \
+            fonts-liberation \
+            libgl1-mesa-dri \
+            mesa-utils \
+            at-spi2-core
+
+          # xRDP for remote access
+          sudo apt-get install -y xrdp
+
+          # Browser — Firefox via APT (not Snap)
+          sudo apt-get install -y firefox
+
+          # Utilities: idle detection + dialog/notification support
+          sudo apt-get install -y \
+            xprintidle \
+            zenity \
+            curl \
+            wget \
+            git \
+            htop \
+            nano \
+            net-tools \
+            bash-completion
+
+          # Theme + Icons (lightweight, makes XFCE look good)
+          sudo apt-get install -y --no-install-recommends \
+            adwaita-icon-theme \
+            gnome-themes-extra
+
+          echo "::endgroup::"
+
+          echo "::group::Cleanup — free disk space"
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "::endgroup::"
+
+          echo "Disk usage after install:"
+          df -h /
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 4: CONFIGURE xRDP & XFCE SESSION
+      # ═══════════════════════════════════════════════════════════════
+      - name: Configure xRDP & XFCE Session Engine
+        run: |
+          # Configure xRDP to use XFCE4
+          echo "startxfce4" | sudo tee /etc/skel/.xsession
+          sudo chmod +x /etc/skel/.xsession
+
+          # xRDP: Performance tuning for low-latency remote desktop
+          sudo sed -i 's/^max_bpp=.*/max_bpp=24/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^xserverbpp=.*/xserverbpp=24/' /etc/xrdp/xrdp.ini
+
+          # Force TCP (same as Windows workflow — stability)
+          if ! grep -q "^tcp_send_buffer_bytes" /etc/xrdp/xrdp.ini; then
+            sudo sed -i '/^\[Globals\]/a tcp_send_buffer_bytes=65536' /etc/xrdp/xrdp.ini
+          fi
+
+          # Enable xRDP to use ssl-cert
+          sudo adduser xrdp ssl-cert 2>/dev/null || true
+
+          # Fix policykit crash on login (common xRDP+XFCE issue)
+          sudo bash -c 'cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla << POLKIT
+          [Allow Colord all Users]
+          Identity=unix-user:*
+          Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=yes
+          POLKIT'
+
+          # Fix session registration crash (another common xRDP issue)
+          sudo bash -c 'cat > /etc/xrdp/startwm.sh << "STARTWM"
+          #!/bin/sh
+          # Fix xRDP + XFCE session issues
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          if [ -r /etc/profile ]; then
+              . /etc/profile
+          fi
+
+          # Source user session file
+          if [ -r ~/.xsession ]; then
+              . ~/.xsession
+          else
+              startxfce4
+          fi
+          STARTWM'
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+          # Start xRDP service
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+
+          # Open firewall for RDP
+          sudo ufw allow 3389/tcp 2>/dev/null || true
+
+          echo "xRDP configured and running on port 3389."
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 5: PROVISION LOCAL USER ACCOUNT
+      # ═══════════════════════════════════════════════════════════════
+      - name: Provision Local Administrator Account
+        run: |
+          RDP_USER="${{ env.RDP_USER }}"
+          RDP_PASS="${{ env.RDP_PASS }}"
+
+          # Create user with home directory
+          sudo useradd -m -s /bin/bash "$RDP_USER"
+          echo "${RDP_USER}:${RDP_PASS}" | sudo chpasswd
+
+          # Add to necessary groups
+          sudo usermod -aG sudo,ssl-cert,adm "$RDP_USER"
+
+          # Allow passwordless sudo (for desktop convenience)
+          echo "${RDP_USER} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$RDP_USER"
+
+          # Create .xsession for user
+          echo "startxfce4" | sudo tee /home/"$RDP_USER"/.xsession
+          sudo chmod +x /home/"$RDP_USER"/.xsession
+          sudo chown "$RDP_USER":"$RDP_USER" /home/"$RDP_USER"/.xsession
+
+          # Ensure state-repo is accessible
+          sudo chown -R "$RDP_USER":"$RDP_USER" /opt/state-repo
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 6: DEPLOY PERSISTENCE SERVICES & DESKTOP TOOLS
+      # ═══════════════════════════════════════════════════════════════
+      - name: Deploy Distributed Persistence Services & Client Runtime
+        run: |
+          STATE="/opt/state-repo"
+          USER_HOME="/home/${{ env.RDP_USER }}"
+
+          # Ensure directories
+          mkdir -p "$STATE/Logs" "$STATE/InitScripts" "$STATE/Files" "$STATE/Config"
+
+          # .gitignore for state repo
+          if [ ! -f "$STATE/.gitignore" ]; then
+            cat > "$STATE/.gitignore" << 'GITIGNORE'
+          *.sh
+          *.flag
+          *.log
+          Logs/
+          .gitignore
+          InitScripts/
+          GITIGNORE
+          fi
+
+          # ──────────────────────────────────────────────────────────
+          # 1. FORCE-BACKUP SCRIPT
+          # ──────────────────────────────────────────────────────────
+          cat > "$STATE/Force-Backup.sh" << 'BACKUP'
+          #!/bin/bash
+          set -e
+          USER_HOME="/home/$SUDO_USER"
+          if [ -z "$USER_HOME" ] || [ "$USER_HOME" = "/root" ]; then
+            USER_HOME=$(eval echo ~$(logname 2>/dev/null || echo $USER))
+          fi
+          STATE="/opt/state-repo"
+
+          echo -e "\033[32mForcing Manual Backup to Remote Database...\033[0m"
+          cd "$STATE"
+
+          # Backup XFCE configs
+          mkdir -p "$STATE/Linux/Config/xfce4"
+          if [ -d "$USER_HOME/.config/xfce4" ]; then
+            cp -a "$USER_HOME/.config/xfce4/xfconf" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+            cp -a "$USER_HOME/.config/xfce4/terminal" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+            cp -a "$USER_HOME/.config/xfce4/panel" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+          fi
+
+          # Backup GTK theme settings
+          mkdir -p "$STATE/Linux/Config/gtk-3.0"
+          cp -a "$USER_HOME/.config/gtk-3.0/settings.ini" "$STATE/Linux/Config/gtk-3.0/" 2>/dev/null || true
+
+          # Backup shell configs
+          mkdir -p "$STATE/Linux/Config/shell"
+          cp "$USER_HOME/.bashrc" "$STATE/Linux/Config/shell/bashrc" 2>/dev/null || true
+          cp "$USER_HOME/.profile" "$STATE/Linux/Config/shell/profile" 2>/dev/null || true
+
+          echo "Committing and Pushing to Database (GitHub)..."
+          git add Linux/Config/
+          STAGED=$(git diff --cached --name-only)
+          if [ -n "$STAGED" ]; then
+            git commit -m "Manual Backup (Linux) $(date '+%H:%M:%S')"
+            git push origin main
+            echo -e "\033[36mBackup Sent! You can close this window.\033[0m"
+          else
+            echo -e "\033[33mNo changes detected. Backup skipped.\033[0m"
+          fi
+          sleep 3
+          BACKUP
+          chmod +x "$STATE/Force-Backup.sh"
+
+          # ──────────────────────────────────────────────────────────
+          # 2. FORCE-RESTORE SCRIPT
+          # ──────────────────────────────────────────────────────────
+          cat > "$STATE/Force-Restore.sh" << 'RESTORE'
+          #!/bin/bash
+          set -e
+          USER_HOME="/home/$SUDO_USER"
+          if [ -z "$USER_HOME" ] || [ "$USER_HOME" = "/root" ]; then
+            USER_HOME=$(eval echo ~$(logname 2>/dev/null || echo $USER))
+          fi
+          STATE="/opt/state-repo"
+
+          echo -e "\033[33mForcing Manual Restore from Database...\033[0m"
+          cd "$STATE"
+
+          echo "Pulling latest state from Database (GitHub)..."
+          git reset --hard HEAD
+          git pull origin main --rebase --strategy-option=theirs
+
+          echo "Restoring XFCE configuration..."
+          if [ -d "$STATE/Linux/Config/xfce4" ]; then
+            mkdir -p "$USER_HOME/.config/xfce4"
+            cp -a "$STATE/Linux/Config/xfce4/"* "$USER_HOME/.config/xfce4/" 2>/dev/null || true
+          fi
+
+          if [ -f "$STATE/Linux/Config/gtk-3.0/settings.ini" ]; then
+            mkdir -p "$USER_HOME/.config/gtk-3.0"
+            cp "$STATE/Linux/Config/gtk-3.0/settings.ini" "$USER_HOME/.config/gtk-3.0/" 2>/dev/null || true
+          fi
+
+          if [ -d "$STATE/Linux/Config/shell" ]; then
+            cp "$STATE/Linux/Config/shell/bashrc" "$USER_HOME/.bashrc" 2>/dev/null || true
+            cp "$STATE/Linux/Config/shell/profile" "$USER_HOME/.profile" 2>/dev/null || true
+          fi
+
+          # Fix ownership
+          chown -R "$(basename "$USER_HOME")":"$(basename "$USER_HOME")" "$USER_HOME/.config" 2>/dev/null || true
+
+          echo -e "\033[36mRestore Complete! Log out and back in to apply changes.\033[0m"
+          sleep 3
+          RESTORE
+          chmod +x "$STATE/Force-Restore.sh"
+
+          # ──────────────────────────────────────────────────────────
+          # 3. BACKGROUND SYNC DAEMON
+          # ──────────────────────────────────────────────────────────
+          cat > "$STATE/StateSync.sh" << 'SYNC'
+          #!/bin/bash
+          STATE="/opt/state-repo"
+          LOG="$STATE/Logs/SyncAgent.log"
+          USER_HOME="/home/RDPUSER_PLACEHOLDER"
+
+          log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }
+
+          # Wait for desktop session
+          while ! pgrep -x xfce4-session >/dev/null 2>&1; do sleep 2; done
+          sleep 5
+
+          log "=== DAEMON INITIALIZED ==="
+
+          # Copy desktop tools
+          DESKTOP="$USER_HOME/Desktop"
+          mkdir -p "$DESKTOP"
+          cp "$STATE/Force-Backup.sh" "$DESKTOP/" 2>/dev/null || true
+          cp "$STATE/Force-Restore.sh" "$DESKTOP/" 2>/dev/null || true
+          if [ -f "$STATE/Toggle-AutoShutdown.sh" ]; then
+            cp "$STATE/Toggle-AutoShutdown.sh" "$DESKTOP/" 2>/dev/null || true
+          fi
+          cp "$STATE/Finish-Session.sh" "$DESKTOP/" 2>/dev/null || true
+          chmod +x "$DESKTOP"/*.sh 2>/dev/null || true
+          chown -R "$(basename "$USER_HOME")":"$(basename "$USER_HOME")" "$DESKTOP"
+
+          # One-time restore on first login
+          RESTORE_FLAG="/tmp/linux_state_restored.flag"
+          if [ ! -f "$RESTORE_FLAG" ]; then
+            cd "$STATE"
+            git config user.name "Sync Agent"
+            git config user.email "agent@rdp.local"
+            git pull origin main --rebase --strategy-option=theirs --quiet 2>/dev/null || true
+
+            if [ -d "$STATE/Linux/Config/xfce4" ]; then
+              mkdir -p "$USER_HOME/.config/xfce4"
+              cp -a "$STATE/Linux/Config/xfce4/"* "$USER_HOME/.config/xfce4/" 2>/dev/null || true
+              chown -R "$(basename "$USER_HOME")":"$(basename "$USER_HOME")" "$USER_HOME/.config" 2>/dev/null || true
+              log "XFCE config restored from database."
+            fi
+
+            if [ -f "$STATE/Linux/Config/gtk-3.0/settings.ini" ]; then
+              mkdir -p "$USER_HOME/.config/gtk-3.0"
+              cp "$STATE/Linux/Config/gtk-3.0/settings.ini" "$USER_HOME/.config/gtk-3.0/" 2>/dev/null || true
+            fi
+
+            if [ -d "$STATE/Linux/Config/shell" ]; then
+              cp "$STATE/Linux/Config/shell/bashrc" "$USER_HOME/.bashrc" 2>/dev/null || true
+              cp "$STATE/Linux/Config/shell/profile" "$USER_HOME/.profile" 2>/dev/null || true
+            fi
+
+            touch "$RESTORE_FLAG"
+            log "First-login restoration complete."
+          fi
+
+          # Periodic sync loop
+          while true; do
+            cd "$STATE"
+            git pull origin main --rebase --strategy-option=theirs --quiet 2>/dev/null || true
+
+            # Backup current state
+            mkdir -p "$STATE/Linux/Config/xfce4"
+            if [ -d "$USER_HOME/.config/xfce4" ]; then
+              cp -a "$USER_HOME/.config/xfce4/xfconf" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+              cp -a "$USER_HOME/.config/xfce4/terminal" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+              cp -a "$USER_HOME/.config/xfce4/panel" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+            fi
+
+            mkdir -p "$STATE/Linux/Config/gtk-3.0"
+            cp "$USER_HOME/.config/gtk-3.0/settings.ini" "$STATE/Linux/Config/gtk-3.0/" 2>/dev/null || true
+
+            mkdir -p "$STATE/Linux/Config/shell"
+            cp "$USER_HOME/.bashrc" "$STATE/Linux/Config/shell/bashrc" 2>/dev/null || true
+            cp "$USER_HOME/.profile" "$STATE/Linux/Config/shell/profile" 2>/dev/null || true
+
+            git add Linux/Config/
+            STAGED=$(git diff --cached --name-only)
+            if [ -n "$STAGED" ]; then
+              git commit -m "Auto-save (Linux) $(date '+%H:%M:%S')" --quiet
+              git push origin main --quiet
+              log "Delta synchronized."
+            fi
+
+            sleep 300
+          done
+          SYNC
+          # Replace placeholder with actual username
+          sed -i "s/RDPUSER_PLACEHOLDER/${{ env.RDP_USER }}/g" "$STATE/StateSync.sh"
+          chmod +x "$STATE/StateSync.sh"
+
+          # ──────────────────────────────────────────────────────────
+          # 4. FINISH-SESSION SCRIPT (Green Checkmark Tool)
+          # ──────────────────────────────────────────────────────────
+          cat > "$STATE/Finish-Session.sh" << 'FINISH'
+          #!/bin/bash
+          touch /opt/state-repo/end_run.flag
+          zenity --info --title="Session Ending" --text="Workflow will terminate gracefully.\nGreen checkmark guaranteed." --timeout=5 2>/dev/null || true
+          FINISH
+          chmod +x "$STATE/Finish-Session.sh"
+
+          # ──────────────────────────────────────────────────────────
+          # 5. HYPER-OPTIMIZATION INITSCRIPT
+          # ──────────────────────────────────────────────────────────
+          cat > "$STATE/InitScripts/01-HyperOptimize.sh" << 'OPTIMIZE'
+          #!/bin/bash
+          echo "--- INITIATING HYPER-OPTIMIZATION ---"
+
+          # Wait for desktop
+          while ! pgrep -x xfce4-session >/dev/null 2>&1; do sleep 2; done
+          sleep 3
+
+          # Kill remaining bloat processes
+          TARGETS=(
+            packagekitd
+            fwupd
+            ModemManager
+            evolution-alarm-notify
+            at-spi-bus-launcher
+            gvfsd-trash
+            gvfsd-metadata
+            tracker-miner
+            tracker-store
+          )
+          for t in "${TARGETS[@]}"; do
+            pkill -f "$t" 2>/dev/null || true
+          done
+
+          # Aggressive memory reclaim
+          echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+          echo "SUCCESS: System optimized for RDP."
+          OPTIMIZE
+          chmod +x "$STATE/InitScripts/01-HyperOptimize.sh"
+
+          # ──────────────────────────────────────────────────────────
+          # 6. INITSCRIPTS RUNNER (executes all scripts in InitScripts/)
+          # ──────────────────────────────────────────────────────────
+          cat > "$STATE/Run-InitScripts.sh" << 'INITRUN'
+          #!/bin/bash
+          INIT_DIR="/opt/state-repo/InitScripts"
+          FLAG="/tmp/init_scripts_run.flag"
+
+          if [ -d "$INIT_DIR" ] && [ ! -f "$FLAG" ]; then
+            for script in "$INIT_DIR"/*; do
+              if [ -f "$script" ] && [ -x "$script" ]; then
+                bash "$script" &
+              fi
+            done
+            touch "$FLAG"
+          fi
+          INITRUN
+          chmod +x "$STATE/Run-InitScripts.sh"
+
+          # ──────────────────────────────────────────────────────────
+          # 7. REGISTER DAEMONS AS SYSTEMD SERVICES
+          # ──────────────────────────────────────────────────────────
+
+          # StateSync daemon
+          sudo bash -c 'cat > /etc/systemd/system/state-sync.service << SERVICE
+          [Unit]
+          Description=RDP State Synchronization Daemon
+          After=xrdp.service
+
+          [Service]
+          Type=simple
+          ExecStart=/bin/bash /opt/state-repo/StateSync.sh
+          Restart=on-failure
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE'
+
+          # InitScripts runner
+          sudo bash -c 'cat > /etc/systemd/system/init-scripts.service << SERVICE
+          [Unit]
+          Description=RDP InitScripts Runner
+          After=xrdp.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash /opt/state-repo/Run-InitScripts.sh
+          User=root
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE'
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable state-sync.service init-scripts.service
+          sudo systemctl start state-sync.service init-scripts.service
+
+          # Fix ownership
+          sudo chown -R "${{ env.RDP_USER }}":"${{ env.RDP_USER }}" "$STATE"
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 7: DEPLOY SAVE-RUNTIME IDLE MONITOR
+      # ═══════════════════════════════════════════════════════════════
+      - name: Deploy Save-Runtime Post-Login Inactivity Monitor
+        if: ${{ env.SAVE_RUNTIME == 'true' }}
+        run: |
+          STATE="/opt/state-repo"
+          IDLE_MS=$(( ${{ env.IDLE_TIMEOUT_MIN }} * 60 * 1000 ))
+
+          cat > "$STATE/SaveRuntimeDaemon.sh" << IDLE
+          #!/bin/bash
+          IDLE_TIMEOUT_MS=${IDLE_MS}
+
+          # Wait for X session
+          while ! pgrep -x xfce4-session >/dev/null 2>&1; do sleep 2; done
+          sleep 5
+
+          # Need DISPLAY for xprintidle
+          export DISPLAY=:10.0
+          export XAUTHORITY=/home/${{ env.RDP_USER }}/.Xauthority
+
+          while true; do
+            sleep 10
+
+            # Skip if auto-shutdown is disabled
+            if [ -f "/opt/state-repo/idle_disabled.flag" ]; then
+              continue
+            fi
+
+            # Get idle time in milliseconds
+            IDLE_TIME=\$(sudo -u ${{ env.RDP_USER }} DISPLAY=:10.0 xprintidle 2>/dev/null || echo 0)
+
+            if [ "\$IDLE_TIME" -gt "\$IDLE_TIMEOUT_MS" ] 2>/dev/null; then
+              # Show warning dialog with 60s countdown
+              RESULT=\$(sudo -u ${{ env.RDP_USER }} DISPLAY=:10.0 zenity --question \
+                --title="Save Runtime" \
+                --text="Idle Timeout (${{ env.IDLE_TIMEOUT_MIN }}m). Shutdown in 60s.\n\nClick OK to stay." \
+                --timeout=60 2>/dev/null; echo \$?)
+
+              if [ "\$RESULT" != "0" ]; then
+                touch /opt/state-repo/end_run.flag
+                exit 0
+              fi
+            fi
+          done
+          IDLE
+          chmod +x "$STATE/SaveRuntimeDaemon.sh"
+
+          # Register as systemd service
+          sudo bash -c 'cat > /etc/systemd/system/idle-monitor.service << SERVICE
+          [Unit]
+          Description=RDP Idle Inactivity Monitor
+          After=xrdp.service state-sync.service
+
+          [Service]
+          Type=simple
+          ExecStart=/bin/bash /opt/state-repo/SaveRuntimeDaemon.sh
+          Restart=on-failure
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE'
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable idle-monitor.service
+          sudo systemctl start idle-monitor.service
+
+          # Toggle script
+          cat > "$STATE/Toggle-AutoShutdown.sh" << 'TOGGLE'
+          #!/bin/bash
+          FLAG="/opt/state-repo/idle_disabled.flag"
+          if [ -f "$FLAG" ]; then
+            rm -f "$FLAG"
+            zenity --info --title="Status" --text="Auto-Shutdown ENABLED.\nSystem will monitor inactivity." --timeout=4 2>/dev/null || echo "Auto-Shutdown ENABLED"
+          else
+            touch "$FLAG"
+            zenity --warning --title="Status" --text="Auto-Shutdown DISABLED.\nInactivity monitor bypassed." --timeout=4 2>/dev/null || echo "Auto-Shutdown DISABLED"
+          fi
+          TOGGLE
+          chmod +x "$STATE/Toggle-AutoShutdown.sh"
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 8: INITIALIZE TAILSCALE MESH OVERLAY
+      # ═══════════════════════════════════════════════════════════════
+      - name: Initialize Secure Mesh Overlay & Protocol Routing
+        env:
+          TS_API: ${{ secrets.TAILSCALE_API_KEY }}
+          TS_TAILNET: ${{ secrets.TAILSCALE_TAILNET }}
+        run: |
+          HOSTNAME="${{ env.RDP_USER }}-linux"
+          TAILNET="${TS_TAILNET:--}"
+
+          # Clean stray offline nodes
+          if [ -n "$TS_API" ]; then
+            echo "Tailscale API Key detected. Resolving stray offline nodes ($HOSTNAME)..."
+            AUTH_HEADER="Authorization: Basic $(echo -n "${TS_API}:" | base64)"
+
+            DEVICES=$(curl -s -H "$AUTH_HEADER" "https://api.tailscale.com/api/v2/tailnet/${TAILNET}/devices" 2>/dev/null || echo "{}")
+            STRAY_IDS=$(echo "$DEVICES" | python3 -c "
+          import sys, json
+          try:
+            data = json.load(sys.stdin)
+            for d in data.get('devices', []):
+              if d.get('hostname') == '$HOSTNAME':
+                print(d['id'])
+          except: pass
+          " 2>/dev/null)
+
+            if [ -n "$STRAY_IDS" ]; then
+              for ID in $STRAY_IDS; do
+                curl -s -X DELETE -H "$AUTH_HEADER" "https://api.tailscale.com/api/v2/device/$ID" 2>/dev/null
+                echo "Orphaned node $ID terminated."
+              done
+            else
+              echo "VPN Mesh routing is clean."
+            fi
+          fi
+
+          # Install Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+          # Connect to tailnet
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="$HOSTNAME"
+
+          # Wait for IP
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 24 ]; do
+            RAW=$(tailscale ip -4 2>/dev/null || true)
+            if echo "$RAW" | grep -q "^100\."; then
+              TS_IP=$(echo "$RAW" | tr -d '[:space:]')
+            else
+              sleep 5
+              RETRIES=$((RETRIES + 1))
+            fi
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "::error::Tailscale routing failed."
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 9: INTERACTIVE RUNTIME & TELEMETRY STREAM
+      # ═══════════════════════════════════════════════════════════════
+      - name: Execute Interactive Runtime & Telemetry Stream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Mask password from logs
+          echo "::add-mask::${{ env.RDP_PASS }}"
+
+          echo "=================================================="
+          echo "         SECURE VPN ENTRY — LINUX XFCE"
+          echo "=================================================="
+          echo "Routing IP : $TAILSCALE_IP"
+          echo "Identifier : ${{ env.RDP_USER }}"
+          echo "Credential : ${{ env.RDP_PASS }}"
+          echo "Protocol   : RDP (port 3389)"
+          echo "=================================================="
+          echo "System diagnostics will stream upon connection..."
+          echo ""
+          echo "RAM Status:"
+          free -h
+          echo ""
+
+          LOG_FILE="/opt/state-repo/Logs/SyncAgent.log"
+          END_TIME=$(date -d "+350 minutes" +%s)
+          LAST_POS=0
+
+          # Pre-Login config
+          SAVE_RUNTIME_ENABLED="${{ env.SAVE_RUNTIME }}"
+          IDLE_TIMEOUT_SECS=$(( ${{ env.IDLE_TIMEOUT_MIN }} * 60 ))
+          START_TIME=$(date +%s)
+          IS_LOGGED_IN=false
+
+          while [ "$(date +%s)" -lt "$END_TIME" ]; do
+
+            # Phase 1: Pre-Login Idle Monitor
+            if [ "$SAVE_RUNTIME_ENABLED" = "true" ] && [ "$IS_LOGGED_IN" = "false" ]; then
+              # Check if xRDP has an active session
+              if pgrep -x xfce4-session >/dev/null 2>&1; then
+                IS_LOGGED_IN=true
+                echo ""
+                echo "[SUCCESS] RDP Connection established. Handing over idle monitoring to interactive daemon..."
+              elif [ $(( $(date +%s) - START_TIME )) -gt "$IDLE_TIMEOUT_SECS" ]; then
+                echo ""
+                echo "[ALERT] Pre-Login Timeout Reached! No RDP connection within ${{ env.IDLE_TIMEOUT_MIN }} minutes."
+                echo "::notice::Workflow completion triggered by Idle Timeout (Pre-Login)."
+                break
+              fi
+            fi
+
+            # Phase 2: Post-Login flag check
+            if [ -f "/opt/state-repo/end_run.flag" ]; then
+              echo ""
+              echo "[ALERT] Session termination requested. Gracefully finishing workflow..."
+              echo "::notice::Workflow completion triggered by User/Idle Timeout."
+              break
+            fi
+
+            # Stream sync agent logs
+            if [ -f "$LOG_FILE" ]; then
+              CURRENT_SIZE=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+              if [ "$CURRENT_SIZE" -gt "$LAST_POS" ]; then
+                tail -c +$((LAST_POS + 1)) "$LOG_FILE" 2>/dev/null
+                LAST_POS=$CURRENT_SIZE
+              fi
+            fi
+
+            sleep 5
+          done
+
+      # ═══════════════════════════════════════════════════════════════
+      # STEP 10: FINALIZE SESSION — EMERGENCY STATE SYNC
+      # ═══════════════════════════════════════════════════════════════
+      - name: Finalize Session Persistence & State Synchronization
+        if: always()
+        run: |
+          echo "=== INITIATING EMERGENCY TEARDOWN ==="
+          STATE="/opt/state-repo"
+          USER_HOME="/home/${{ env.RDP_USER }}"
+
+          if [ ! -d "$STATE" ]; then
+            echo "State repo not found. Nothing to save."
+            exit 0
+          fi
+
+          echo "Neutralizing Background Agents..."
+          sudo systemctl stop state-sync.service idle-monitor.service init-scripts.service 2>/dev/null || true
+          sleep 2
+
+          # Clean git locks
+          rm -f "$STATE/.git/index.lock" 2>/dev/null || true
+
+          cd "$STATE"
+          git config user.name "Emergency Agent"
+          git config user.email "agent@rdp.local"
+
+          # Final state capture
+          echo "Capturing final session state..."
+
+          mkdir -p "$STATE/Linux/Config/xfce4"
+          if [ -d "$USER_HOME/.config/xfce4" ]; then
+            cp -a "$USER_HOME/.config/xfce4/xfconf" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+            cp -a "$USER_HOME/.config/xfce4/terminal" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+            cp -a "$USER_HOME/.config/xfce4/panel" "$STATE/Linux/Config/xfce4/" 2>/dev/null || true
+          fi
+
+          mkdir -p "$STATE/Linux/Config/gtk-3.0"
+          cp "$USER_HOME/.config/gtk-3.0/settings.ini" "$STATE/Linux/Config/gtk-3.0/" 2>/dev/null || true
+
+          mkdir -p "$STATE/Linux/Config/shell"
+          cp "$USER_HOME/.bashrc" "$STATE/Linux/Config/shell/bashrc" 2>/dev/null || true
+          cp "$USER_HOME/.profile" "$STATE/Linux/Config/shell/profile" 2>/dev/null || true
+
+          git add Linux/Config/
+          STAGED=$(git diff --cached --name-only)
+          if [ -n "$STAGED" ]; then
+            echo "Changes detected, committing..."
+            git commit -m "Emergency Save (Linux) $(date '+%H:%M:%S')" --quiet
+          else
+            echo "No local changes detected."
+          fi
+
+          echo "Synchronizing with Database (Remote Repository)..."
+          git pull origin main --rebase --strategy-option=theirs --quiet 2>/dev/null || true
+          git push origin main --quiet
+
+          if [ $? -eq 0 ]; then
+            echo "Volatile state synchronized successfully."
+          else
+            echo "::warning::Remote synchronization failed."
+          fi
