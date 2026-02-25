@@ -46,7 +46,7 @@ jobs:
           
           # --- SELF-ELEVATION GUARD CLAUSE (To be included in both manual scripts) ---
           $elevationCheck = @(
-            '# --- SELF-ELEVATION GUARD ---',
+            '# --- SELF-ELEVATION GUARD: Check for Admin rights and re-launch if necessary ---',
             '$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())',
             'if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {',
             '    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`"";',
@@ -94,7 +94,9 @@ jobs:
               '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '    }',
               '    Write-Host "Restarting Explorer to apply changes..."',
-              '    Stop-Process -Name explorer -Force',
+              '    taskkill /F /IM explorer.exe | Out-Null',
+              '    Start-Sleep -Seconds 1',
+              '    Start-Process explorer.exe',
               '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
               '} else {',
               '    Write-Host "No registry backup found in repository!" -ForegroundColor Red',
@@ -128,7 +130,7 @@ jobs:
               '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
               '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '        }',
-              '        Stop-Process -Name explorer -Force',
+              '        taskkill /F /IM explorer.exe | Out-Null',
               '        Write-Log "Restoration Complete."',
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
@@ -152,9 +154,7 @@ jobs:
               '        git commit -m "$msg" 2>&1 | Out-Null',
               '        git push origin main 2>&1',
               '        Write-Log "Push Complete."',
-              '    } else {',
-              '        Write-Log "No setting changes detected."',
-              '    }',
+              '    } else { Write-Log "No setting changes detected." }',
               '    Start-Sleep -Seconds 300',
               '}'
           )
@@ -224,7 +224,8 @@ jobs:
                   Set-Location $stateRepo
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
-                  git reset --hard HEAD
+                  # CRITICAL FIX: Forcefully reset local repo to prevent pull/rebase errors from ghost runs
+                  git reset --hard origin/main
                   git pull origin main --rebase 2>&1 | Out-Null
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "$stateRepo\Registry\Personalize.reg" /y
                   reg export "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "$stateRepo\Registry\ExplorerAdvanced.reg" /y
