@@ -73,42 +73,15 @@ jobs:
           
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
-      - name: Configure Remote Desktop Services & Deep Debloat
-        shell: powershell
+      - name: Configure Remote Desktop Services & UI Policies
         run: |
-          # 1. CPU/RAM OPTIMIZATION: KILL TELEMETRY & BLOAT TASKS/SERVICES
-          Write-Host "Killing High-CPU Telemetry Tasks (CompatTelRunner, CEIP)..."
-          # This corrected array targets the tasks responsible for the high CPU usage seen in Task Manager
-          $telemetryTasks = @(
-              "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
-              "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
-              "\Microsoft\Windows\Application Experience\StartupAppTask",
-              "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
-              "\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask",
-              "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip"
-          )
-          foreach ($task in $telemetryTasks) {
-              try {
-                  Disable-ScheduledTask -TaskPath $task -ErrorAction Stop
-              } catch {
-                  Write-Warning "Could not disable scheduled task '$task'. It may not exist on this image."
-              }
-          }
-
-          Write-Host "Disabling heavy background services (Search, SysMain, Telemetry)..."
-          $heavyServices = @("WSearch", "SysMain", "DiagTrack")
-          foreach ($service in $heavyServices) {
-              Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
-              Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
-          }
-          
-          # 2. DEFENDER BYPASS: Use ExclusionPath instead of Disable (Bypasses Tamper Protection)
+          # 1. DEFENDER BYPASS: Whitelist C:\ to stop CPU usage without triggering "Tamper Protection" blocks
           Write-Host "Optimizing CPU: Whitelisting entire C:\ drive to neutralize Defender Real-time Scan..."
           Add-MpPreference -ExclusionPath "C:\" -Force -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionProcess "git.exe" -Force -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionProcess "powershell.exe" -Force -ErrorAction SilentlyContinue
           
-          # 3. DESKTOP DEBLOAT
+          # 2. DEBLOAT: Clean both Public and Default desktop templates to stop Unity/R from spawning for new users
           Write-Host "Nuking Developer Bloat from Core Desktop Templates..."
           $desktopPaths = @("C:\Users\Public\Desktop", "C:\Users\Default\Desktop")
           foreach ($path in $desktopPaths) {
@@ -117,13 +90,24 @@ jobs:
               }
           }
           
+          # 3. TELEMETRY KILL
+          Write-Host "Stopping Server 2025 Telemetry Services..."
+          Stop-Service -Name "DiagTrack" -Force -ErrorAction SilentlyContinue
+          Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
+          
           # 4. RDP & FIREWALL
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           
-          # 5. UI OPTIMIZATION
-          Write-Host "Optimizing Desktop UI: Forcing .ps1 files to execute natively on double-click..."
+          # 5. UI & PERFORMANCE OPTIMIZATION
+          Write-Host "Optimizing Desktop UI & Latency..."
           cmd.exe /c "assoc .ps1=Microsoft.PowerShellScript.1" | Out-Null
+          
+          # Networking: Disable Throttling for RDP smoothness
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Force
+          
+          # Disk: Disable NTFS Last Access update to reduce "System" process I/O
+          fsutil behavior set disablelastaccess 1 | Out-Null
           
           $psExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
           $cmdString = "`"$psExe`" -ExecutionPolicy Bypass -WindowStyle Normal -File `"%1`""
@@ -328,7 +312,54 @@ jobs:
           )
           $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
 
-          # 4. INITIALIZATION SCRIPT EXECUTOR & ALL-USERS SHORTCUT
+          # 5. HYPER-OPTIMIZATION INITSCRIPT (Windows Server 2025 Resource Fixes)
+          $optScript = @(
+              'Write-Host "--- INITIATING HYPER-OPTIMIZATION (8GB RAM TARGET) ---" -ForegroundColor Cyan',
+              '$ErrorActionPreference = "SilentlyContinue"',
+              '',
+              '# A. SUBDUE SYSTEM BLOAT (DISK/CPU)',
+              '$bloatServices = @("WSearch", "SysMain", "UsoSvc", "DiagTrack", "FabricHostSvc", "LanmanWorkstation")',
+              'foreach ($svc in $bloatServices) {',
+              '    Write-Host "Neutralizing $svc..."',
+              '    Stop-Service -Name $svc -Force',
+              '    Set-Service -Name $svc -StartupType Disabled',
+              '    # Fallback: Force Registry Disable',
+              '    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "Start" -Value 4 -Force',
+              '}',
+              '',
+              '# B. SCREENSHOT TARGETS & FALLBACKS',
+              'Write-Host "Targeting Screenshot Bloat..."',
+              '$targets = @("ServiceFabricLocalClusterManager", "SearchHost", "CompatTelRunner", "CompatTel")',
+              'foreach ($t in $targets) { Stop-Process -Name $t -Force; taskkill /F /IM "$t.exe" /T }',
+              '',
+              '# C. DISK THRASHING FALLBACK (Nuke Update Cache if pinning disk)',
+              'if ((Get-Counter "\LogicalDisk(C:)\% Disk Time").CounterSamples.CookedValue -gt 90) {',
+              '    Write-Host "High Disk Activity Detected. Clearing SoftwareDistribution fallback..."',
+              '    Stop-Service -Name "wuauserv" -Force',
+              '    Remove-Item -Path "C:\Windows\SoftwareDistribution\*" -Recurse -Force',
+              '}',
+              '',
+              '# D. MEMORY TRIMMER & PRIORITY MANAGEMENT',
+              'Write-Host "Optimizing Memory & Process Priorities..."',
+              'Get-Process | ForEach-Object {',
+              '    try {',
+              '        if ($_.Name -eq "explorer") { $_.PriorityClass = "High" }',
+              '        elseif ($_.Name -match "msmpeng|git|StateSync|powershell") { ',
+              '            $_.PriorityClass = "BelowNormal"',
+              '            # Pin heavy processes to Core 0 to leave Core 1 free for GUI',
+              '            $_.ProcessorAffinity = 1 ',
+              '        }',
+              '        # Periodic Working Set Trimming',
+              '        $_.MinWorkingSet = [IntPtr]::Zero',
+              '        $_.MaxWorkingSet = [IntPtr]::Zero',
+              '    } catch {}',
+              '}',
+              '',
+              'Write-Host "Hyper-Optimization Complete. System resources released." -ForegroundColor Green'
+          )
+          $optScript | Out-File -FilePath "C:\state-repo\InitScripts\01-HyperOptimize.ps1" -Encoding UTF8
+
+          # 6. INITIALIZATION SCRIPT EXECUTOR & ALL-USERS SHORTCUT
           $logonScript = @(
               '$initDir = "C:\state-repo\InitScripts"',
               '$runFlag = "$env:TEMP\init_scripts_run.flag"',
@@ -459,6 +490,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Ensure fallback passwords are comprehensively masked from public/private logs
+          Write-Output "::add-mask::${{ env.RDP_PASS }}"
+          
           Write-Host "================ SECURE VPN ENTRY ================"
           Write-Host "Routing IP : $env:TAILSCALE_IP"
           Write-Host "Identifier : ${{ env.RDP_USER }}"
