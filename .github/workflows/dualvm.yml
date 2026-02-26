@@ -205,378 +205,122 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "${{ env.RDP_USER }}"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${{ env.RDP_USER }}"
 
-      - name: Deploy Distributed Persistence Services & Client Runtime
+      - name: Setup Persistence Workspace & Data Maps
         shell: powershell
         run: |
-          $gitignorePath = "C:\state-repo\.gitignore"
-          if (-not (Test-Path $gitignorePath)) {
-              "*.ps1`n*.flag`n*.log`nLogs/`n.gitignore" | Out-File -FilePath $gitignorePath -Encoding UTF8
-          }
-          
-          # Ensure directory exists before writing any InitScripts
           if (-not (Test-Path "C:\state-repo\InitScripts")) { New-Item -Path "C:\state-repo\InitScripts" -ItemType Directory -Force | Out-Null }
-
-          $agentPath = "C:\state-repo\StateSync.ps1"
+          if (-not (Test-Path "C:\state-repo\Logs")) { New-Item -Path "C:\state-repo\Logs" -ItemType Directory -Force | Out-Null }
           
-          # --- COMMON DECLARATIONS ---
-          $DataMaps = @(
+          $commonData = @(
               "`$targetUser = '${{ env.RDP_USER }}'",
               '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
               'try { $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value } catch { $sid = "UNKNOWN" }',
-              '$profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath',
+              '$profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -EA SilentlyContinue).ProfileImagePath',
               'if ([string]::IsNullOrWhiteSpace($profilePath)) { $profilePath = "C:\Users\$targetUser" }',
               '$stateRepo = ''C:\state-repo''',
               '$osPrefix = ''Windows''',
-              '',
-              '$SyncRegistryMap = @{',
-              '    "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"',
-              '    "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"',
-              '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
-              '    "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"',
-              '    "DWM.reg"              = "Software\Microsoft\Windows\DWM"',
-              '    "Desktop.reg"          = "Control Panel\Desktop"',
-              '}',
-              '',
-              '$SyncFolderMap = @{',
-              '    "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"',
-              '    "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
-              '}'
+              '$SyncRegistryMap = @{ "Themes.reg"="Software\Microsoft\Windows\CurrentVersion\Themes"; "Wallpapers.reg"="Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"; "ExplorerAdvanced.reg"="Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; "StuckRects3.reg"="Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"; "DWM.reg"="Software\Microsoft\Windows\DWM"; "Desktop.reg"="Control Panel\Desktop" }',
+              '$SyncFolderMap = @{ "LocalAppDataThemes"="$profilePath\AppData\Local\Microsoft\Windows\Themes"; "AppDataThemes"="$profilePath\AppData\Roaming\Microsoft\Windows\Themes" }',
+              '$elevationCheck = { if (-not (New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`""; exit } }'
           )
-          
-          $elevationCheck = @(
-            '# --- SELF-ELEVATION GUARD ---',
-            '$currentUser = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())',
-            'if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {',
-            '    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -File `"$PSCommandPath`"";',
-            '    exit;',
-            '}'
-          )
-          
-          # 1. MANUAL BACKUP SCRIPT
-          $backupScript = $elevationCheck + $DataMaps + @(
-              'Write-Host "Forcing Manual Backup to Remote Database..." -ForegroundColor Green',
+          $commonData | Out-File -FilePath "C:\state-repo\common_vars.ps1" -Encoding UTF8
+
+      - name: Deploy Manual Maintenance Tools (Backup/Restore)
+        shell: powershell
+        run: |
+          $common = Get-Content "C:\state-repo\common_vars.ps1" -Raw
+          $backupScript = $common + "`n& `$elevationCheck`n" + @(
+              'Write-Host "Forcing Manual Backup..." -ForegroundColor Green',
               'Set-Location $stateRepo',
-              '',
-              'if (-not (Test-Path "$stateRepo\$osPrefix\Registry")) { New-Item -Path "$stateRepo\$osPrefix\Registry" -ItemType Directory -Force | Out-Null }',
-              'if (-not (Test-Path "$stateRepo\$osPrefix\Files")) { New-Item -Path "$stateRepo\$osPrefix\Files" -ItemType Directory -Force | Out-Null }',
-              '',
-              'Write-Host "Exporting dynamic registry mapping..."',
-              'foreach ($key in $SyncRegistryMap.Keys) {',
-              '    reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\$osPrefix\Registry\$key" /y | Out-Null',
-              '}',
-              '',
-              'Write-Host "Backing up dynamic directory mapping..."',
-              'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    $dest = "$stateRepo\$osPrefix\Files\$folder"',
-              '    if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
-              '    Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
-              '}',
-              '',
-              '# Extract wallpaper path from .theme file (immune to public runner display adapter corruption)',
+              'foreach ($folder in $SyncFolderMap.Keys) { $dest = "$stateRepo\$osPrefix\Files\$folder"; if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }; Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -EA SilentlyContinue }',
+              'foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\$osPrefix\Registry\$key" /y | Out-Null }',
               '$ct = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes" -Name "CurrentTheme" -EA SilentlyContinue).CurrentTheme',
-              'if ($ct -and (Test-Path $ct)) {',
-              '    $tc = Get-Content $ct -Raw',
-              '    if ($tc -match "(?m)^Wallpaper=(.+)$") {',
-              '        $wp = [Environment]::ExpandEnvironmentVariables($Matches[1].Trim())',
-              '        $wp | Out-File -FilePath "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt" -Encoding UTF8 -Force',
-              '        Write-Host "Saved wallpaper path from theme: $wp"',
-              '    }',
-              '}',
-              '',
-              '# Sanitize backup: never commit corrupt TranscodedWallpaper to git',
-              'Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue',
-              'Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\CachedFiles" -Recurse -Force -ErrorAction SilentlyContinue',
-              '',
-              'Write-Host "Committing and Pushing to Database (GitHub)..."',
-              'git add "$osPrefix/Registry/*.reg"',
-              'git add "$osPrefix/Files/*"',
-              '$staged = git diff --cached --name-only',
-              'if ($staged) {',
-              '    git commit -m "Manual Backup (Windows) $(Get-Date -Format ''HH:mm:ss'')"',
-              '    git push origin main',
-              '    Write-Host "Backup Sent! You can close this window." -ForegroundColor Cyan',
-              '} else {',
-              '    Write-Host "No changes detected. Backup skipped." -ForegroundColor Yellow',
-              '}',
-              'Start-Sleep -Seconds 5'
+              'if ($ct -and (Test-Path $ct)) { if ((Get-Content $ct -Raw) -match "(?m)^Wallpaper=(.+)$") { [Environment]::ExpandEnvironmentVariables($Matches[1].Trim()) | Out-File -FilePath "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt" -Encoding UTF8 -Force } }',
+              'Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\TranscodedWallpaper" -Force -EA SilentlyContinue',
+              'Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\CachedFiles" -Recurse -Force -EA SilentlyContinue',
+              'git add . ; if (git diff --cached --name-only) { git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"; git push origin main }',
+              'Write-Host "Done!" -ForegroundColor Cyan; Start-Sleep -Seconds 5'
           )
           $backupScript | Out-File -FilePath "C:\state-repo\Force-Backup.ps1" -Encoding UTF8
 
-          # 2. MANUAL RESTORE SCRIPT
-          $restoreScript = $elevationCheck + $DataMaps + @(
-              'Write-Host "Forcing Manual Restore from Database..." -ForegroundColor Yellow',
-              'Set-Location $stateRepo',
-              '',
-              'Write-Host "Pulling latest state from Database (GitHub)..."',
-              'git reset --hard HEAD',
-              'git pull origin main --rebase --strategy-option=theirs',
-              '',
-              '# Nuke stale wallpaper cache',
-              '$themeDir = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
-              'Remove-Item "$themeDir\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue',
-              'Remove-Item "$themeDir\CachedFiles" -Recurse -Force -ErrorAction SilentlyContinue',
-              '',
-              'Write-Host "Restoring physical assets..."',
-              'foreach ($folder in $SyncFolderMap.Keys) {',
-              '    if (Test-Path "$stateRepo\$osPrefix\Files\$folder") {',
-              '        Copy-Item -Path "$stateRepo\$osPrefix\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue',
-              '    }',
-              '}',
-              '',
-              '# Delete TranscodedWallpaper AGAIN after copy (backup copy may be corrupt)',
-              'Remove-Item "$themeDir\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue',
-              '',
-              'Write-Host "Applying registry map..."',
-              'if (Test-Path "$stateRepo\$osPrefix\Registry") {',
-              '    Get-ChildItem -Path "$stateRepo\$osPrefix\Registry" -Filter "*.reg" | ForEach-Object { ',
-              '        $content = Get-Content $_.FullName',
-              '        $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
-              '        $content | Out-File -FilePath $_.FullName -Encoding Unicode',
-              '        Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
-              '    }',
-              '    ',
-              '    # Override corrupt Desktop.reg wallpaper values',
-              '    $savedWP = "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt"',
-              '    $wpPath = $null',
-              '    if (Test-Path $savedWP) { $wpPath = (Get-Content $savedWP -Raw).Trim() }',
-              '    if ($wpPath -and (Test-Path $wpPath)) {',
-              '        $deskKey = "Registry::HKEY_USERS\$sid\Control Panel\Desktop"',
-              '        Set-ItemProperty -Path $deskKey -Name "WallPaper" -Value $wpPath -Force',
-              '        Set-ItemProperty -Path $deskKey -Name "WallpaperStyle" -Value "10" -Force',
-              '        Set-ItemProperty -Path $deskKey -Name "TileWallpaper" -Value "0" -Force',
-              '        Remove-ItemProperty -Path $deskKey -Name "TranscodedImageCache" -Force -ErrorAction SilentlyContinue',
-              '    }',
-              '    ',
-              '    Write-Host "Restarting Explorer..."',
-              '    Stop-Process -Name explorer -Force',
-              '    Start-Sleep -Seconds 3',
-              '    ',
-              '    # Force wallpaper via Win32 API',
-              '    if ($wpPath -and (Test-Path $wpPath)) {',
-              '        Add-Type -TypeDefinition @"',
-              'using System; using System.Runtime.InteropServices;',
-              'public class WP { [DllImport("user32.dll",CharSet=CharSet.Auto)] public static extern int SystemParametersInfo(int a,int b,string c,int d); }',
-              '"@',
-              '        [WP]::SystemParametersInfo(0x0014, 0, $wpPath, 3) | Out-Null',
-              '        Write-Host "Wallpaper applied: $wpPath" -ForegroundColor Green',
-              '    }',
-              '    Write-Host "Restore Complete! You can close this window." -ForegroundColor Cyan',
-              '} else {',
-              '    Write-Host "No registry backup found in repository!" -ForegroundColor Red',
-              '}',
-              'Start-Sleep -Seconds 5'
+          $restoreScript = $common + "`n& `$elevationCheck`n" + @(
+              'Write-Host "Forcing Manual Restore..." -ForegroundColor Yellow; Set-Location $stateRepo; git reset --hard HEAD; git pull origin main --rebase --strategy-option=theirs',
+              'foreach ($folder in $SyncFolderMap.Keys) { if (Test-Path "$stateRepo\$osPrefix\Files\$folder") { Copy-Item -Path "$stateRepo\$osPrefix\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -EA SilentlyContinue } }',
+              'Remove-Item "$profilePath\AppData\Roaming\Microsoft\Windows\Themes\TranscodedWallpaper" -Force -EA SilentlyContinue',
+              'Get-ChildItem -Path "$stateRepo\$osPrefix\Registry" -Filter "*.reg" | ForEach-Object { $c = Get-Content $_.FullName; ($c -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid") | Out-File -FilePath $_.FullName -Encoding Unicode; Start-Process reg.exe -ArgumentList "import `"$($_.FullName)`"" -Wait }',
+              '$sWP = "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt"; if (Test-Path $sWP) { $wp = (Get-Content $sWP -Raw).Trim() } else { $wp = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Control Panel\Desktop" -Name "WallPaper" -EA SilentlyContinue).WallPaper }',
+              'if ($wp -and (Test-Path $wp)) { $dk = "Registry::HKEY_USERS\$sid\Control Panel\Desktop"; Set-ItemProperty $dk -Name "WallPaper" -Value $wp -Force; Set-ItemProperty $dk -Name "WallpaperStyle" -Value "10" -Force; Remove-ItemProperty $dk -Name "TranscodedImageCache" -Force -EA SilentlyContinue }',
+              'Set-ItemProperty "Registry::HKEY_USERS\$sid\Control Panel\Accessibility\HighContrast" -Name "Flags" -Value "0" -Force -EA SilentlyContinue',
+              'Stop-Process -Name explorer -Force; Start-Sleep -Seconds 3',
+              'if ($wp -and (Test-Path $wp)) { Add-Type "using System; using System.Runtime.InteropServices; public class W { [DllImport(`"user32.dll`")] public static extern int SystemParametersInfo(int a,int b,string c,int d); }"; [W]::SystemParametersInfo(0x0014, 0, $wp, 3) | Out-Null }',
+              'Write-Host "Restore Complete!"; Start-Sleep -Seconds 5'
           )
           $restoreScript | Out-File -FilePath "C:\state-repo\Force-Restore.ps1" -Encoding UTF8
 
-          # 3. BACKGROUND TELEMETRY DAEMON
+      - name: Deploy Background Synchronizer Daemon
+        shell: powershell
+        run: |
+          $common = Get-Content "C:\state-repo\common_vars.ps1" -Raw
           $syncScript = @(
               "if (`$env:USERNAME -ne '${{ env.RDP_USER }}') { exit }",
-              '$ErrorActionPreference = ''SilentlyContinue''',
               '$logFile = "C:\state-repo\Logs\SyncAgent.log"',
-              'if (-not (Test-Path "C:\state-repo\Logs")) { New-Item -Path "C:\state-repo\Logs" -ItemType Directory -Force | Out-Null }',
-              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "[$timestamp] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
-              '',
-              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }',
+              'function Write-Log { param([string]$M); "[(Get-Date)] `$M" | Out-File $logFile -Append -Encoding UTF8 }',
+              'while (-not (Get-Process explorer -EA SilentlyContinue)) { Start-Sleep 1 }',
               'Copy-Item "C:\state-repo\Force-Backup.ps1" "$env:USERPROFILE\Desktop\Force-Backup.ps1" -Force',
-              'Copy-Item "C:\state-repo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force',
-              'if (Test-Path "C:\state-repo\Toggle-AutoShutdown.ps1") { Copy-Item "C:\state-repo\Toggle-AutoShutdown.ps1" "$env:USERPROFILE\Desktop\Toggle-AutoShutdown.ps1" -Force }'
-          ) + $DataMaps + @(
-              'Write-Log "=== DAEMON INITIALIZED: $sid ==="',
+              'Copy-Item "C:\state-repo\Force-Restore.ps1" "$env:USERPROFILE\Desktop\Force-Restore.ps1" -Force'
+          ) + $common + @(
               '$restoredFlag = "$env:TEMP\registry_restored.flag"',
-              '',
-              '# PERFORMANCE: Disable Visual FX inside the active user session (Corrected Logic)',
-              '$fxPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"',
-              'if (-not (Test-Path $fxPath)) { New-Item -Path $fxPath -Force | Out-Null }',
-              'Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue',
-              '',
               'if (-not (Test-Path $restoredFlag)) {',
-              '    # Clean desktop upon login',
-              '    Get-ChildItem -Path "$env:USERPROFILE\Desktop" -Filter "*.lnk" -Force | Where-Object { $_.Name -notmatch "Firefox|Chrome|Edge|Force|Toggle" } | Remove-Item -Force -ErrorAction SilentlyContinue',
-              '    ',
-              '    # Ensure Themes service is running',
-              '    Start-Service -Name "Themes" -ErrorAction SilentlyContinue',
-              '    ',
-              '    # Restore files from backup first',
-              '    foreach ($folder in $SyncFolderMap.Keys) {',
-              '        if (Test-Path "$stateRepo\$osPrefix\Files\$folder") { Copy-Item -Path "$stateRepo\$osPrefix\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
-              '    }',
-              '    ',
-              '    # NOW delete TranscodedWallpaper AFTER file copy (so the corrupt backup copy gets nuked)',
-              '    $themeDir = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
-              '    Remove-Item "$themeDir\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue',
-              '    Remove-Item "$themeDir\CachedFiles" -Recurse -Force -ErrorAction SilentlyContinue',
-              '    ',
+              '    Start-Service Themes -EA SilentlyContinue',
+              '    foreach ($folder in $SyncFolderMap.Keys) { if (Test-Path "$stateRepo\$osPrefix\Files\$folder") { Copy-Item "$stateRepo\$osPrefix\Files\$folder\*" $SyncFolderMap[$folder] -Recurse -Force -EA SilentlyContinue } }',
+              '    Remove-Item "$profilePath\AppData\Roaming\Microsoft\Windows\Themes\TranscodedWallpaper" -Force -EA SilentlyContinue',
               '    if (Test-Path "$stateRepo\$osPrefix\Registry") {',
-              '        Write-Log "Found backup in DB (Windows). Restoring..."',
-              '        Get-ChildItem -Path "$stateRepo\$osPrefix\Registry" -Filter "*.reg" | ForEach-Object { ',
-              '            $content = Get-Content $_.FullName; $content = $content -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid"',
-              '            $content | Out-File -FilePath $_.FullName -Encoding Unicode',
-              '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
-              '        }',
-              '        ',
-              '        # CRITICAL: Override corrupt Desktop.reg wallpaper values with saved theme path',
-              '        $savedWP = "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt"',
-              '        $wpPath = $null',
-              '        if (Test-Path $savedWP) { $wpPath = (Get-Content $savedWP -Raw).Trim() }',
-              '        if (-not $wpPath -or -not (Test-Path $wpPath)) {',
-              '            $wpPath = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Control Panel\Desktop" -Name "WallPaper" -EA SilentlyContinue).WallPaper',
-              '        }',
-              '        if ($wpPath -and (Test-Path $wpPath)) {',
-              '            $deskKey = "Registry::HKEY_USERS\$sid\Control Panel\Desktop"',
-              '            Set-ItemProperty -Path $deskKey -Name "WallPaper" -Value $wpPath -Force',
-              '            Set-ItemProperty -Path $deskKey -Name "WallpaperStyle" -Value "10" -Force',
-              '            Set-ItemProperty -Path $deskKey -Name "TileWallpaper" -Value "0" -Force',
-              '            Remove-ItemProperty -Path $deskKey -Name "TranscodedImageCache" -Force -ErrorAction SilentlyContinue',
-              '        }',
-              '        ',
-              '        # Uncheck Ease of Access "Remove background images"',
-              '        $eaPath = "Registry::HKEY_USERS\$sid\Control Panel\Accessibility\HighContrast"',
-              '        if (Test-Path $eaPath) { Set-ItemProperty -Path $eaPath -Name "Flags" -Value "0" -Force -ErrorAction SilentlyContinue }',
-              '        ',
-              '        Stop-Process -Name explorer -Force',
-              '        # Wait for Explorer to fully restart',
-              '        $r = 0; while (-not (Get-Process -Name explorer -EA SilentlyContinue) -and $r -lt 15) { Start-Sleep -Seconds 1; $r++ }',
-              '        Start-Sleep -Seconds 3',
-              '        ',
-              '        # Force wallpaper via Win32 API in the user interactive session',
-              '        if ($wpPath -and (Test-Path $wpPath)) {',
-              '            try {',
-              '                Add-Type -TypeDefinition @"',
-              'using System; using System.Runtime.InteropServices;',
-              'public class WallpaperAPI {',
-              '    [DllImport("user32.dll", CharSet=CharSet.Auto)]',
-              '    public static extern int SystemParametersInfo(int a, int b, string c, int d);',
-              '}',
-              '"@',
-              '                [WallpaperAPI]::SystemParametersInfo(0x0014, 0, $wpPath, 3) | Out-Null',
-              '                Write-Log "Wallpaper forced via Win32 API: $wpPath"',
-              '            } catch { Write-Log "Win32 wallpaper API failed: $_" }',
-              '        } else { Write-Log "No valid wallpaper path found in backup." }',
-              '        Write-Log "Restoration Complete."',
+              '        Get-ChildItem "$stateRepo\$osPrefix\Registry" -Filter "*.reg" | ForEach-Object { $c = Get-Content $_.FullName; ($c -replace "HKEY_CURRENT_USER", "HKEY_USERS\$sid") | Out-File $_.FullName -Encoding Unicode; Start-Process reg.exe -ArgumentList "import `"$($_.FullName)`"" -Wait }',
+              '        $sWP = "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt"; if (Test-Path $sWP) { $wp = (Get-Content $sWP -Raw).Trim() } else { $wp = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Control Panel\Desktop" -Name "WallPaper" -EA SilentlyContinue).WallPaper }',
+              '        if ($wp -and (Test-Path $wp)) { $dk = "Registry::HKEY_USERS\$sid\Control Panel\Desktop"; Set-ItemProperty $dk -Name WallPaper -Value $wp -Force; Set-ItemProperty $dk -Name WallpaperStyle -Value 10 -Force; Remove-ItemProperty $dk -Name TranscodedImageCache -Force -EA SilentlyContinue }',
+              '        Set-ItemProperty "Registry::HKEY_USERS\$sid\Control Panel\Accessibility\HighContrast" -Name Flags -Value 0 -Force -EA SilentlyContinue',
+              '        Stop-Process -Name explorer -Force; $r=0; while (-not (Get-Process explorer -EA SilentlyContinue) -and $r -lt 15) { Start-Sleep 1; $r++ }; Start-Sleep 3',
+              '        if ($wp -and (Test-Path $wp)) { Add-Type "using System; using System.Runtime.InteropServices; public class W { [DllImport(`"user32.dll`")] public static extern int SystemParametersInfo(int a,int b,string c,int d); }"; [W]::SystemParametersInfo(0x0014, 0, $wp, 3) | Out-Null }',
               '    }',
-              '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
+              '    New-Item $restoredFlag -ItemType File | Out-Null',
               '}',
-              '',
               'while ($true) {',
-              '    Set-Location $stateRepo',
-              '    git config user.name "RDP Sync Agent"',
-              '    git config user.email "agent@rdp.local"',
-              '    git pull origin main --rebase --strategy-option=theirs --quiet',
-              '    ',
-              '    if (-not (Test-Path "$stateRepo\$osPrefix\Registry")) { New-Item -Path "$stateRepo\$osPrefix\Registry" -ItemType Directory -Force | Out-Null }',
-              '    if (-not (Test-Path "$stateRepo\$osPrefix\Files")) { New-Item -Path "$stateRepo\$osPrefix\Files" -ItemType Directory -Force | Out-Null }',
-              '    ',
+              '    Set-Location $stateRepo; git pull origin main --rebase --strategy-option=theirs --quiet',
               '    foreach ($key in $SyncRegistryMap.Keys) { reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\$osPrefix\Registry\$key" /y | Out-Null }',
-              '    foreach ($folder in $SyncFolderMap.Keys) {',
-              '        $dest = "$stateRepo\$osPrefix\Files\$folder"',
-              '        if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }',
-              '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
-              '    }',
-              '    ',
-              '    # Extract wallpaper path from .theme file',
+              '    foreach ($f in $SyncFolderMap.Keys) { Copy-Item "$($SyncFolderMap[$f])\*" "$stateRepo\$osPrefix\Files\$f" -Recurse -Force -EA SilentlyContinue }',
               '    $ct = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes" -Name "CurrentTheme" -EA SilentlyContinue).CurrentTheme',
-              '    if ($ct -and (Test-Path $ct)) {',
-              '        $tc = Get-Content $ct -Raw',
-              '        if ($tc -match "(?m)^Wallpaper=(.+)$") {',
-              '            $wp = [Environment]::ExpandEnvironmentVariables($Matches[1].Trim())',
-              '            $wp | Out-File -FilePath "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt" -Encoding UTF8 -Force',
-              '            Write-Log "Saved WP from theme: $wp"',
-              '        }',
-              '    }',
-              '    # Sanitize: never commit corrupt TranscodedWallpaper to git',
-              '    Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue',
-              '    Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\CachedFiles" -Recurse -Force -ErrorAction SilentlyContinue',
-              '    ',
-              '    git add "$osPrefix/Registry/*.reg"',
-              '    git add "$osPrefix/Files/*"',
-              '    $staged = git diff --cached --name-only',
-              '    if ($staged) {',
-              '        git commit -m "Auto-save Settings (Windows) $(Get-Date -Format ''HH:mm:ss'')" --quiet',
-              '        git push origin main --quiet',
-              '        Write-Log "Delta synchronized."
-              }',
-              '    Start-Sleep -Seconds 300',
+              '    if ($ct -and (Test-Path $ct)) { if ((Get-Content $ct -Raw) -match "(?m)^Wallpaper=(.+)$") { [Environment]::ExpandEnvironmentVariables($Matches[1].Trim()) | Out-File "$stateRepo\$osPrefix\Files\theme_wallpaper_path.txt" -Encoding UTF8 -Force } }',
+              '    Remove-Item "$stateRepo\$osPrefix\Files\AppDataThemes\TranscodedWallpaper" -Force -EA SilentlyContinue',
+              '    git add . ; if (git diff --cached --name-only) { git commit -m "Auto-save $(Get-Date -Format ''HH:mm:ss'')" --quiet; git push origin main --quiet }',
+              '    Start-Sleep 300',
               '}'
           )
-          $syncScript | Out-File -FilePath $agentPath -Encoding UTF8
+          $syncScript | Out-File -FilePath "C:\state-repo\StateSync.ps1" -Encoding UTF8
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\StateSync.ps1"
+          $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
+          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $principal -Force | Out-Null
 
-          # 5. HYPER-OPTIMIZATION INITSCRIPT (Windows Server 2025 Resource Fixes)
+      - name: Deploy System Optimization & Lifecycle Hooks
+        shell: powershell
+        run: |
           $optScript = @(
-              'Write-Host "--- INITIATING HYPER-OPTIMIZATION (8GB RAM TARGET) ---" -ForegroundColor Cyan',
-              '$ErrorActionPreference = "SilentlyContinue"',
-              '',
-              '# A. SYNC WITH LOGON & STATE RESTORE',
-              'while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
-              'Start-Sleep -Seconds 5 # Give restoration a head start',
-              '',
-              '# B. SUBDUE SYSTEM BLOAT (DISK/CPU)',
-              '$bloatServices = @("WSearch", "SysMain", "UsoSvc", "DiagTrack", "FabricHostSvc", "LanmanWorkstation", "OneSyncSvc", "CDPSvc")',
-              'foreach ($svc in $bloatServices) {',
-              '    Write-Host "Stopping $svc..."',
-              '    Stop-Service -Name $svc -Force',
-              '    Set-Service -Name $svc -StartupType Disabled',
-              '}',
-              '',
-              '# C. SPECIFIC BLOAT TARGETS (AGGRRESSIVE TELEMETRY KILL)',
-              'Write-Host "Cleaning background clutter & Telemetry Shims..."',
-              '$targets = @("ServiceFabricLocalClusterManager", "SearchHost", "CompatTelRunner", "CompatTel", "RuntimeBroker", "SgrmBroker", "DeviceCensus")',
-              'foreach ($t in $targets) { ',
-              '    Write-Host "Terminating $t..."',
-              '    Get-Process -Name $t -ErrorAction SilentlyContinue | Stop-Process -Force ',
-              '}',
-              '',
-              '# D. PERFORMANCE ENFORCEMENT (Memory Trimming & Priority)',
-              'Write-Host "Optimizing Memory & Process Fairness..."',
-              'Get-Process | ForEach-Object {',
-              '    try {',
-              '        if ($_.Name -eq "explorer") { $_.PriorityClass = "High" }',
-              '        elseif ($_.Name -match "msmpeng|git|StateSync|powershell") { ',
-              '            $_.PriorityClass = "BelowNormal"',
-              '            $_.ProcessorAffinity = 1 # Pin to secondary core',
-              '        }',
-              '        # Aggressive Working Set Trimming',
-              '        $_.MinWorkingSet = [IntPtr]::Zero',
-              '        $_.MaxWorkingSet = [IntPtr]::Zero',
-              '    } catch {}',
-              '}',
-              '',
-              'Write-Host "SUCCESSS: System optimized for RDP." -ForegroundColor Green'
+              'while (-not (Get-Process explorer -EA SilentlyContinue)) { Start-Sleep 2 }',
+              '$bloats = @("WSearch", "SysMain", "UsoSvc", "DiagTrack", "FabricHostSvc", "CDPSvc")',
+              'foreach ($s in $bloats) { Stop-Service $s -Force; Set-Service $s -StartupType Disabled }',
+              'foreach ($t in @("SearchHost", "CompatTelRunner", "RuntimeBroker")) { Get-Process $t -EA SilentlyContinue | Stop-Process -Force }',
+              'Get-Process | ForEach-Object { try { if ($_.Name -eq "explorer") { $_.PriorityClass = "High" } elseif ($_.Name -match "git|StateSync") { $_.PriorityClass = "BelowNormal"; $_.ProcessorAffinity = 1 } $_.MinWorkingSet = [IntPtr]::Zero; $_.MaxWorkingSet = [IntPtr]::Zero } catch {} }'
           )
           $optScript | Out-File -FilePath "C:\state-repo\InitScripts\01-HyperOptimize.ps1" -Encoding UTF8
-
-          # 6. INITIALIZATION SCRIPT EXECUTOR & ALL-USERS SHORTCUT
-          $logonScript = @(
-              '$initDir = "C:\state-repo\InitScripts"',
-              '$runFlag = "$env:TEMP\init_scripts_run.flag"',
-              'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
-              '    Get-ChildItem -Path $initDir -File | Sort-Object Name | ForEach-Object {',
-              '        if ($_.Extension -match "\.ps1$") { Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait }',
-              '        elseif ($_.Extension -match "\.py$") { Start-Process "python" -ArgumentList "`"$($_.FullName)`"" -Wait }',
-              '        elseif ($_.Extension -match "\.(bat|cmd)$") { Start-Process "cmd.exe" -ArgumentList "/c `"$($_.FullName)`"" -Wait }',
-              '    }',
-              '    New-Item -Path $runFlag -ItemType File -Force | Out-Null',
+          "New-Item -Path 'C:\state-repo\end_run.flag' -ItemType File -Force" | Out-File -FilePath "C:\Users\Public\Desktop\Finish-Session.ps1" -Encoding UTF8
+          $hooks = @(
+              'if ((Test-Path "C:\state-repo\InitScripts") -and -not (Test-Path "$env:TEMP\init_run.flag")) {',
+              '    Get-ChildItem "C:\state-repo\InitScripts" -File | ForEach-Object { Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait }',
+              '    New-Item "$env:TEMP\init_run.flag" -ItemType File -Force | Out-Null',
               '}'
           )
-          $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
-          
-          # 7. GRACEFUL EXIT SHORTCUT (The "Green Checkmark" Tool)
-          $finishScript = 'New-Item -Path "C:\state-repo\end_run.flag" -ItemType File -Force'
-          $desktopPath = "C:\Users\Public\Desktop\Finish-Session.ps1"
-          $finishScript | Out-File -FilePath $desktopPath -Encoding UTF8
-          
-          $startupFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
-          if (-not (Test-Path $startupFolder)) { New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
-          $WshShell = New-Object -comObject WScript.Shell
-          $Shortcut = $WshShell.CreateShortcut("$startupFolder\InitScriptsHook.lnk")
-          $Shortcut.TargetPath = "powershell.exe"
-          $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
-          $Shortcut.Save()
-
-          # 5. REGISTER CORE TELEMETRY TASK
-          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentPath`""
-          $trigger = New-ScheduledTaskTrigger -AtLogOn
-          $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Administrators" -RunLevel Highest
-          Register-ScheduledTask -TaskName "RDPStateSync" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+          $hooks | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
+          $s = (New-Object -com WScript.Shell).CreateShortcut("$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\Hooks.lnk")
+          $s.TargetPath = "powershell.exe"; $s.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"; $s.Save()
 
       - name: Deploy Save-Runtime Post-Login Inactivity Monitor
         if: ${{ env.SAVE_RUNTIME == 'true' }}
