@@ -1,4 +1,4 @@
-name: winbase-Static-Persistent-Final
+name: RDP-base-Persistent-Final
 
 on:
   workflow_dispatch:
@@ -12,9 +12,9 @@ env:
   RDP_PASS: ${{ secrets.RDP_PASSWORD || 'SecureP@ssw0rd!2024' }}
   SAVE_RUNTIME: ${{ secrets.SAVE_RUNTIME || 'true' }}
   IDLE_TIMEOUT_MIN: ${{ secrets.IDLE_TIMEOUT_MIN || '3' }}
-  RDP_WIDTH: ''     # e.g., 1920 (Blank for dynamic/best quality)
-  RDP_HEIGHT: ''    # e.g., 1080 (Blank for dynamic/best quality)
-  RDP_BIT_DEPTH: '' # e.g., 32 (Blank for dynamic/best quality)
+  RDP_WIDTH: ''     # e.g., 1920
+  RDP_HEIGHT: ''    # e.g., 1080
+  RDP_BIT_DEPTH: '' # e.g., 32
 
 jobs:
   secure-rdp:
@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Provision Distributed State Infrastructure (Primary/Fallback Routing)
+      - name: Initialize Distributed State Repository (Primary/Fallback Routing)
         shell: powershell
         env:
           DB_PAT: ${{ secrets.BACKUP_DB_PAT }}
@@ -78,94 +78,29 @@ jobs:
 
       - name: Provision System Infrastructure & Performance Tiers
         run: |
-          # 1. TELEMETRY HARDENING: IFEO Master Block & Service Nullification
-          Write-Host "::group::Telemetry Hardening: Permanently Disabling Microsoft Data Collection"
-          
-          # IFEO BLACKHOLE: Redirect telemetry processes to systray.exe (harmless)
-          $ifeoBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
-          $blockers = @("CompatTelRunner.exe", "DeviceCensus.exe", "SgrmBroker.exe")
-          foreach ($app in $blockers) {
-              $appPath = "$ifeoBase\$app"
-              if (-not (Test-Path $appPath)) { New-Item -Path $appPath -Force | Out-Null }
-              Set-ItemProperty -Path $appPath -Name "Debugger" -Value "C:\Windows\System32\systray.exe" -Force
-          }
-          
-          # Policy level block
-          $telemetryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
-          if (-not (Test-Path $telemetryPath)) { New-Item -Path $telemetryPath -Force | Out-Null }
-          Set-ItemProperty -Path $telemetryPath -Name "AllowTelemetry" -Value 0 -Force
-          
-          # Task Scheduler Kill (Hard Hit)
-          $tasks = @(
-              "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
-              "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
-              "\Microsoft\Windows\Application Experience\StartupAppScan",
-              "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
-              "\Microsoft\Windows\Customer Experience Improvement Program\Usbceip"
-          )
-          foreach ($t in $tasks) {
-              Disable-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue | Out-Null
-          }
-          
-          # Service Kill
-          Stop-Service -Name "DiagTrack" -Force -ErrorAction SilentlyContinue
-          Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
-          Write-Host "::endgroup::"
-
-          # 2. SECURITY HARDENING: Neutralizing Real-Time Performance Impacts
-          Write-Host "::group::Security Hardening: Anti-Virus Bypass"
-          Write-Host "Optimizing CPU: Whitelisting entire C:\ drive to neutralize Defender Real-time Scan..."
-          Add-MpPreference -ExclusionPath "C:\" -Force -ErrorAction SilentlyContinue
-          Add-MpPreference -ExclusionProcess "git.exe" -Force -ErrorAction SilentlyContinue
-          Add-MpPreference -ExclusionProcess "powershell.exe" -Force -ErrorAction SilentlyContinue
-          Write-Host "::endgroup::"
-          
-          # 3. DEBLOAT: Clean both Public and Default desktop templates to stop Unity/R from spawning for new users
-          Write-Host "Nuking Developer Bloat from Core Desktop Templates..."
-          $desktopPaths = @("C:\Users\Public\Desktop", "C:\Users\Default\Desktop")
-          foreach ($path in $desktopPaths) {
-              if (Test-Path $path) {
-                  Get-ChildItem -Path $path -Filter "*.lnk" -Force | Where-Object { $_.Name -notmatch "Firefox|Chrome|Edge" } | Remove-Item -Force -ErrorAction SilentlyContinue
-              }
-          }
-          
-          # 4. TELEMETRY KILL
-          Write-Host "Stopping Server 2025 Telemetry Services..."
-          Stop-Service -Name "DiagTrack" -Force -ErrorAction SilentlyContinue
-          Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
-          
-          # 5. RDP & FIREWALL
+          # 1. RDP & FIREWALL
           Write-Host "::group::Service Provisioning: RDP & Network Stack"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           
-          # 6. UI & PERFORMANCE OPTIMIZATION
+          # 2. UI & PERFORMANCE OPTIMIZATION
           Write-Host "Optimizing Desktop UI & Latency..."
           cmd.exe /c "assoc .ps1=Microsoft.PowerShellScript.1" | Out-Null
           
-          # RDP: Optional Configuration (Defaults to Dynamic/Best Quality if empty)
+          # RDP Resolution Logic
           if (-not [string]::IsNullOrWhiteSpace("${{ env.RDP_WIDTH }}") -and -not [string]::IsNullOrWhiteSpace("${{ env.RDP_HEIGHT }}")) {
               Write-Host "Forcing RDP Resolution: ${{ env.RDP_WIDTH }}x${{ env.RDP_HEIGHT }}..."
               $dimPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
               Set-ItemProperty -Path $dimPath -Name "DefaultRuntimeWidth" -Value ${{ env.RDP_WIDTH }} -Force
               Set-ItemProperty -Path $dimPath -Name "DefaultRuntimeHeight" -Value ${{ env.RDP_HEIGHT }} -Force
-          } else {
-              Write-Host "RDP Resolution: Dynamic negotiation enabled (Best Quality)."
           }
           
           if (-not [string]::IsNullOrWhiteSpace("${{ env.RDP_BIT_DEPTH }}")) {
               Write-Host "Forcing Color Depth: ${{ env.RDP_BIT_DEPTH }}-bit..."
               $cDepth = 4
               if ("${{ env.RDP_BIT_DEPTH }}" -eq "16") { $cDepth = 3 }
-              
               $dimPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
               Set-ItemProperty -Path $dimPath -Name "ColorDepth" -Value $cDepth -Force
-              
-              $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-              if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
-              Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value $cDepth -Force
-          } else {
-              Write-Host "Color Depth: Dynamic negotiation enabled (Best Quality)."
           }
           
           # Force TCP for stability
@@ -262,8 +197,7 @@ jobs:
               '}',
               '',
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
-              'git add "$osPrefix/Registry/*.reg"',
-              'git add "$osPrefix/Files/*"',
+              'git add .',
               '$staged = git diff --cached --name-only',
               'if ($staged) {',
               '    git commit -m "Manual Backup (Windows) $(Get-Date -Format ''HH:mm:ss'')"',
@@ -327,7 +261,7 @@ jobs:
               'Write-Log "=== DAEMON INITIALIZED: $sid ==="',
               '$restoredFlag = "$env:TEMP\registry_restored.flag"',
               '',
-              '# PERFORMANCE: Disable Visual FX inside the active user session (Corrected Logic)',
+              '# PERFORMANCE: Disable Visual FX inside the active user session',
               '$fxPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"',
               'if (-not (Test-Path $fxPath)) { New-Item -Path $fxPath -Force | Out-Null }',
               'Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue',
@@ -368,14 +302,13 @@ jobs:
               '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    ',
-              '    git add "$osPrefix/Registry/*.reg"',
-              '    git add "$osPrefix/Files/*"',
+              '    git add .',
               '    $staged = git diff --cached --name-only',
               '    if ($staged) {',
               '        git commit -m "Auto-save Settings (Windows) $(Get-Date -Format ''HH:mm:ss'')" --quiet',
               '        git push origin main --quiet',
-              '        Write-Log "Delta synchronized."
-              }',
+              '        Write-Log "Delta synchronized."',
+              '    }',
               '    Start-Sleep -Seconds 300',
               '}'
           )
@@ -440,7 +373,7 @@ jobs:
           )
           $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
           
-          # 7. GRACEFUL EXIT SHORTCUT (The "Green Checkmark" Tool)
+          # 7. GRACEFUL EXIT SHORTCUT
           $finishScript = 'New-Item -Path "C:\state-repo\end_run.flag" -ItemType File -Force'
           $desktopPath = "C:\Users\Public\Desktop\Finish-Session.ps1"
           $finishScript | Out-File -FilePath $desktopPath -Encoding UTF8
@@ -626,13 +559,18 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
+          # --- 1. DEFINING VARIABLES LOCALLY TO PREVENT SCOPE LOSS ---
           $stateRepo = 'C:\state-repo'
+          $osPrefix  = 'Windows' 
+          $targetUser = "${{ env.RDP_USER }}"
+          
+          Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
           if (-not (Test-Path $stateRepo)) { exit 0 }
           
           Write-Host "Neutralizing Background Agents & Git Locks..."
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "RDPIdleMonitor" -Confirm:$false -ErrorAction SilentlyContinue
+          Get-Process -Name "git" -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep -Seconds 2
           
           if (Test-Path "$stateRepo\.git\index.lock") { 
@@ -640,7 +578,6 @@ jobs:
           }
 
           try {
-              $targetUser = "${{ env.RDP_USER }}"
               $User = New-Object System.Security.Principal.NTAccount($targetUser)
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
               
@@ -667,44 +604,49 @@ jobs:
                       "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"
                   }
                   
-                  if (-not (Test-Path "$stateRepo\$osPrefix\Registry")) { 
-                      New-Item -Path "$stateRepo\$osPrefix\Registry" -ItemType Directory -Force | Out-Null 
-                  }
-                  if (-not (Test-Path "$stateRepo\$osPrefix\Files")) { 
-                      New-Item -Path "$stateRepo\$osPrefix\Files" -ItemType Directory -Force | Out-Null 
-                  }
+                  # --- DIRECTORY SAFETY CHECK ---
+                  $regPath = "$stateRepo\$osPrefix\Registry"
+                  $filesPath = "$stateRepo\$osPrefix\Files"
+                  if (-not (Test-Path $regPath)) { New-Item -Path $regPath -ItemType Directory -Force | Out-Null }
+                  if (-not (Test-Path $filesPath)) { New-Item -Path $filesPath -ItemType Directory -Force | Out-Null }
                   
                   foreach ($key in $SyncRegistryMap.Keys) {
-                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\$osPrefix\Registry\$key" /y | Out-Null
+                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$regPath\$key" /y | Out-Null
                   }
                   
                   foreach ($folder in $SyncFolderMap.Keys) {
-                      $dest = "$stateRepo\$osPrefix\Files\$folder"
+                      $dest = "$filesPath\$folder"
                       if (-not (Test-Path $dest)) { 
                           New-Item -Path $dest -ItemType Directory -Force | Out-Null 
                       }
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
-                  git add "$osPrefix/Registry/*.reg"
-                  git add "$osPrefix/Files/*"
+                  # --- FIXED GIT LOGIC: ADD -> COMMIT -> PULL -> PUSH ---
+                  git add .
                   
                   $staged = git diff --cached --name-only
                   if ($staged) {
                       Write-Host "Changes detected, committing locally..."
                       git commit -m "Emergency Save (Windows) $(Get-Date -Format 'HH:mm:ss')" --quiet
+                      
+                      Write-Host "Synchronizing with Database (Remote Repository)..."
+                      # Try pulling; if it fails (empty repo/orphan), ignore and push
+                      try {
+                          git pull origin main --rebase --strategy-option=theirs --quiet
+                      } catch {
+                          Write-Host "Git Pull Notice: Possible empty remote or initial sync. Proceeding to push." -ForegroundColor Yellow
+                      }
+                      
+                      git push origin main --quiet
+                      
+                      if ($LASTEXITCODE -eq 0) { 
+                          Write-Host "Volatile state synchronized successfully." 
+                      } else { 
+                          Write-Host "Warning: Remote synchronization failed (Code $LASTEXITCODE)." 
+                      }
                   } else { 
                       Write-Host "No local changes detected." 
-                  }
-                  
-                  Write-Host "Synchronizing with Database (Remote Repository)..."
-                  git pull origin main --rebase --strategy-option=theirs --quiet
-                  git push origin main --quiet
-                  
-                  if ($LASTEXITCODE -eq 0) { 
-                      Write-Host "Volatile state synchronized successfully." 
-                  } else { 
-                      Write-Host "Warning: Remote synchronization failed (Code $LASTEXITCODE)." 
                   }
               }
           } catch { 
