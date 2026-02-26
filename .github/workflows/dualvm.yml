@@ -172,6 +172,16 @@ jobs:
           $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
           Set-ItemProperty -Path $tsPath -Name "fClientDisableUDP" -Value 1 -Force
+          
+          # === WALLPAPER POLICY OVERRIDE (Public Runner 4vCPU SKU Fix) ===
+          Write-Host "Applying Wallpaper Policy Overrides for Public Runner SKU..."
+          Set-ItemProperty -Path $tsPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Force
+          
+          $adPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop"
+          if (Test-Path $adPath) { Remove-ItemProperty -Path $adPath -Name "NoChangingWallpaper" -Force -ErrorAction SilentlyContinue }
+          
+          $persPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+          if (Test-Path $persPath) { Remove-ItemProperty -Path $persPath -Name "NoChangingWallpaper" -Force -ErrorAction SilentlyContinue }
           Write-Host "::endgroup::"
           
           $psExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -220,6 +230,7 @@ jobs:
               '',
               '$SyncRegistryMap = @{',
               '    "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"',
+              '    "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"',
               '    "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
               '    "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"',
               '    "DWM.reg"              = "Software\Microsoft\Windows\DWM"',
@@ -333,8 +344,16 @@ jobs:
               'Set-ItemProperty -Path $fxPath -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue',
               '',
               'if (-not (Test-Path $restoredFlag)) {',
-              '    # DOUBLE-TAP: Clean desktop again upon user login to catch any stragglers from Default Profile',
+              '    # DOUBLE-TAP: Clean desktop upon user login',
               '    Get-ChildItem -Path "$env:USERPROFILE\Desktop" -Filter "*.lnk" -Force | Where-Object { $_.Name -notmatch "Firefox|Chrome|Edge|Force|Toggle" } | Remove-Item -Force -ErrorAction SilentlyContinue',
+              '    ',
+              '    # Ensure Themes service is running',
+              '    Start-Service -Name "Themes" -ErrorAction SilentlyContinue',
+              '    ',
+              '    # LAYER 2: Nuke stale wallpaper cache BEFORE restore',
+              '    $themeDir = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
+              '    Remove-Item "$themeDir\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue',
+              '    Remove-Item "$themeDir\CachedFiles" -Recurse -Force -ErrorAction SilentlyContinue',
               '    ',
               '    foreach ($folder in $SyncFolderMap.Keys) {',
               '        if (Test-Path "$stateRepo\$osPrefix\Files\$folder") { Copy-Item -Path "$stateRepo\$osPrefix\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
@@ -347,6 +366,43 @@ jobs:
               '            Start-Process -FilePath "reg.exe" -ArgumentList "import `"$($_.FullName)`"" -Wait',
               '        }',
               '        Stop-Process -Name explorer -Force',
+              '        Start-Sleep -Seconds 3',
+              '        ',
+              '        # LAYER 3: Force wallpaper via Win32 API (bypasses broken Settings UI on public runner SKU)',
+              '        $wpPath = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Control Panel\Desktop" -Name "WallPaper" -EA SilentlyContinue).WallPaper',
+              '        if ($wpPath -and (Test-Path $wpPath)) {',
+              '            try {',
+              '                Add-Type -TypeDefinition @"',
+              'using System;',
+              'using System.Runtime.InteropServices;',
+              'public class WallpaperAPI {',
+              '    [DllImport("user32.dll", CharSet=CharSet.Auto)]',
+              '    public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);',
+              '}',
+              '"@',
+              '                [WallpaperAPI]::SystemParametersInfo(0x0014, 0, $wpPath, 0x01 -bor 0x02) | Out-Null',
+              '                Write-Log "Wallpaper forced via Win32 API: $wpPath"',
+              '            } catch { Write-Log "Win32 wallpaper API call failed: $_" }',
+              '        } else {',
+              '            # Fallback: parse .theme file for wallpaper path',
+              '            try {',
+              '                $regKey = [Microsoft.Win32.Registry]::Users.OpenSubKey("$sid\Software\Microsoft\Windows\CurrentVersion\Themes")',
+              '                if ($regKey) {',
+              '                    $themePath = $regKey.GetValue("CurrentTheme")',
+              '                    if ($themePath -and (Test-Path $themePath)) {',
+              '                        $themeContent = Get-Content $themePath -Raw',
+              '                        if ($themeContent -match "(?m)^Wallpaper=(.+)$") {',
+              '                            $themeWP = $Matches[1].Trim()',
+              '                            $themeWP = [Environment]::ExpandEnvironmentVariables($themeWP)',
+              '                            if (Test-Path $themeWP) {',
+              '                                [WallpaperAPI]::SystemParametersInfo(0x0014, 0, $themeWP, 0x01 -bor 0x02) | Out-Null',
+              '                                Write-Log "Wallpaper forced from .theme file: $themeWP"',
+              '                            }',
+              '                        }',
+              '                    }',
+              '                }',
+              '            } catch { Write-Log "Theme fallback wallpaper failed: $_" }',
+              '        }',
               '        Write-Log "Restoration Complete."',
               '    }',
               '    New-Item -Path $restoredFlag -ItemType File | Out-Null',
@@ -664,6 +720,7 @@ jobs:
                   # --- 3. RE-EXPORT DATA ---
                   $SyncRegistryMap = @{
                       "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
+                      "Wallpapers.reg"       = "Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"
                       "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
                       "StuckRects3.reg"      = "Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
                       "DWM.reg"              = "Software\Microsoft\Windows\DWM"
