@@ -626,13 +626,19 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
+          # --- 1. VARIABLE RE-INITIALIZATION (CRITICAL FIX) ---
           $stateRepo = 'C:\state-repo'
-          if (-not (Test-Path $stateRepo)) { exit 0 }
+          $osPrefix  = 'Windows' 
+          $targetUser = "${{ env.RDP_USER }}"
           
-          Write-Host "Neutralizing Background Agents & Git Locks..."
+          Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
+          if (-not (Test-Path $stateRepo)) { Write-Host "Repo missing, skipping."; exit 0 }
+          
+          # --- 2. CLEANUP BACKGROUND LOCKS ---
+          Write-Host "Neutralizing Background Agents..."
           Unregister-ScheduledTask -TaskName "RDPStateSync" -Confirm:$false -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "RDPIdleMonitor" -Confirm:$false -ErrorAction SilentlyContinue
+          Get-Process -Name "git" -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep -Seconds 2
           
           if (Test-Path "$stateRepo\.git\index.lock") { 
@@ -640,21 +646,22 @@ jobs:
           }
 
           try {
-              $targetUser = "${{ env.RDP_USER }}"
               $User = New-Object System.Security.Principal.NTAccount($targetUser)
               $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value
               
               if (Test-Path "Registry::HKEY_USERS\$sid") {
                   Write-Host "Saving final state for SID: $sid"
                   Set-Location $stateRepo
+                  
+                  # Git Config (Redundant but safe)
                   git config user.name "Emergency Agent"
                   git config user.email "agent@rdp.local"
                   
+                  # Path Logic
                   $profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath
-                  if ([string]::IsNullOrWhiteSpace($profilePath)) { 
-                      $profilePath = "C:\Users\$targetUser" 
-                  }
+                  if ([string]::IsNullOrWhiteSpace($profilePath)) { $profilePath = "C:\Users\$targetUser" }
                   
+                  # --- 3. RE-EXPORT DATA ---
                   $SyncRegistryMap = @{
                       "Themes.reg"           = "Software\Microsoft\Windows\CurrentVersion\Themes"
                       "ExplorerAdvanced.reg" = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
@@ -667,46 +674,53 @@ jobs:
                       "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"
                   }
                   
-                  if (-not (Test-Path "$stateRepo\$osPrefix\Registry")) { 
-                      New-Item -Path "$stateRepo\$osPrefix\Registry" -ItemType Directory -Force | Out-Null 
-                  }
-                  if (-not (Test-Path "$stateRepo\$osPrefix\Files")) { 
-                      New-Item -Path "$stateRepo\$osPrefix\Files" -ItemType Directory -Force | Out-Null 
-                  }
+                  # Ensure Directories Exist (Fixes 'No such file')
+                  $regPath = "$stateRepo\$osPrefix\Registry"
+                  $filesPath = "$stateRepo\$osPrefix\Files"
+                  if (-not (Test-Path $regPath)) { New-Item -Path $regPath -ItemType Directory -Force | Out-Null }
+                  if (-not (Test-Path $filesPath)) { New-Item -Path $filesPath -ItemType Directory -Force | Out-Null }
                   
+                  Write-Host "Exporting Registry..."
                   foreach ($key in $SyncRegistryMap.Keys) {
-                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$stateRepo\$osPrefix\Registry\$key" /y | Out-Null
+                      reg export "HKEY_USERS\$sid\$($SyncRegistryMap[$key])" "$regPath\$key" /y | Out-Null
                   }
                   
+                  Write-Host "Exporting Files..."
                   foreach ($folder in $SyncFolderMap.Keys) {
-                      $dest = "$stateRepo\$osPrefix\Files\$folder"
-                      if (-not (Test-Path $dest)) { 
-                          New-Item -Path $dest -ItemType Directory -Force | Out-Null 
-                      }
+                      $dest = "$filesPath\$folder"
+                      if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
-                  git add "$osPrefix/Registry/*.reg"
-                  git add "$osPrefix/Files/*"
+                  # --- 4. GIT TRANSACTION (FIXED ORDER) ---
+                  Write-Host "Staging changes..."
+                  # Use 'git add .' to catch ALL changes recursively without path issues
+                  git add . 
                   
                   $staged = git diff --cached --name-only
                   if ($staged) {
-                      Write-Host "Changes detected, committing locally..."
+                      Write-Host "Committing local changes..."
                       git commit -m "Emergency Save (Windows) $(Get-Date -Format 'HH:mm:ss')" --quiet
+                      
+                      Write-Host "Pulling remote changes (Rebase)..."
+                      # ORPHAN/EMPTY REPO HANDLER:
+                      # If pull fails (e.g. no common history), we proceed to push anyway
+                      try {
+                          git pull origin main --rebase --strategy-option=theirs --quiet
+                      } catch {
+                          Write-Host "Warning: Git Pull failed (likely empty remote or no history). Attempting Push..." -ForegroundColor Yellow
+                      }
+                      
+                      Write-Host "Pushing to Remote..."
+                      git push origin main --quiet
+                      
+                      if ($LASTEXITCODE -eq 0) { Write-Host "SUCCESS: State synchronized." -ForegroundColor Green }
+                      else { Write-Host "ERROR: Push failed." -ForegroundColor Red }
                   } else { 
-                      Write-Host "No local changes detected." 
-                  }
-                  
-                  Write-Host "Synchronizing with Database (Remote Repository)..."
-                  git pull origin main --rebase --strategy-option=theirs --quiet
-                  git push origin main --quiet
-                  
-                  if ($LASTEXITCODE -eq 0) { 
-                      Write-Host "Volatile state synchronized successfully." 
-                  } else { 
-                      Write-Host "Warning: Remote synchronization failed (Code $LASTEXITCODE)." 
+                      Write-Host "No changes to save." 
                   }
               }
           } catch { 
               Write-Host "Teardown Exception: $($_.Exception.Message)" 
+              exit 0 # Ensure workflow doesn't mark as failure if just a teardown script
           }
