@@ -15,7 +15,7 @@ env:
   RDP_WIDTH: ''     # e.g., 1920 (Blank for dynamic/best quality)
   RDP_HEIGHT: ''    # e.g., 1080 (Blank for dynamic/best quality)
   RDP_BIT_DEPTH: '' # e.g., 32 (Blank for dynamic/best quality)
-  WorkSpace: ${{ vars.WorkSpace || 'database' }}
+  WorkSpace: ${{ vars.WorkSpace || secrets.WorkSpace || 'database' }}
   CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
   PYTHON_SCRIPT_PATH: ${{ vars.PYTHON_SCRIPT_PATH }}
 
