@@ -15,9 +15,9 @@ env:
   RDP_WIDTH: ''     # e.g., 1920 (Blank for dynamic/best quality)
   RDP_HEIGHT: ''    # e.g., 1080 (Blank for dynamic/best quality)
   RDP_BIT_DEPTH: '' # e.g., 32 (Blank for dynamic/best quality)
-  WORKSPACE_DIR: ${{ vars.WORKSPACE_DIR || 'C:\Users\RunnerAdmin\Desktop\database' }}
+  WORKSPACE_DIR: ${{ vars.WORKSPACE_DIR }}
   CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
-  PYTHON_SCRIPT_PATH: ${{ vars.PYTHON_SCRIPT_PATH || 'C:\Users\RunnerAdmin\Desktop\database\server.py' }}
+  PYTHON_SCRIPT_PATH: ${{ vars.PYTHON_SCRIPT_PATH }}
 
 jobs:
   secure-rdp:
@@ -214,7 +214,7 @@ jobs:
           # --- COMMON DECLARATIONS ---
           $DataMaps = @(
               "`$targetUser = '${{ env.RDP_USER }}'",
-              "`$WorkspaceDir = '${{ env.WORKSPACE_DIR }}'",
+              '$WorkspaceDir = if ($env:WORKSPACE_DIR) { $env:WORKSPACE_DIR } else { "C:\Users\RunnerAdmin\Desktop\database" }',
               '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
               'try { $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value } catch { $sid = "UNKNOWN" }',
               '$profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath',
@@ -459,8 +459,8 @@ jobs:
               'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "[$timestamp] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
               '',
               'Write-Log "--- STARTING HEADLESS CLOUDFLARE TUNNEL ---"',
-              '$token = ''${{ env.CF_TUNNEL_TOKEN }}''',
-              '$scriptPath = ''${{ env.PYTHON_SCRIPT_PATH }}''',
+              '$token = $env:CF_TUNNEL_TOKEN',
+              '$scriptPath = if ($env:PYTHON_SCRIPT_PATH) { $env:PYTHON_SCRIPT_PATH } else { "C:\Users\RunnerAdmin\Desktop\database\server.py" }',
               '',
               'if ([string]::IsNullOrWhiteSpace($token)) {',
               '    Write-Log "ERROR: CF_TUNNEL_TOKEN is empty. Skipping tunnel setup."',
@@ -745,7 +745,7 @@ jobs:
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
                   
-                  $WorkspaceDir = '${{ env.WORKSPACE_DIR }}'
+                  $WorkspaceDir = if ($env:WORKSPACE_DIR) { $env:WORKSPACE_DIR } else { "C:\Users\RunnerAdmin\Desktop\database" }
                   if (-not [string]::IsNullOrWhiteSpace($WorkspaceDir) -and (Test-Path $WorkspaceDir)) {
                       $wsDest = "$stateRepo\Workspace"
                       if (-not (Test-Path $wsDest)) { New-Item -Path $wsDest -ItemType Directory -Force | Out-Null }
