@@ -15,7 +15,7 @@ env:
   RDP_WIDTH: ''     # e.g., 1920 (Blank for dynamic/best quality)
   RDP_HEIGHT: ''    # e.g., 1080 (Blank for dynamic/best quality)
   RDP_BIT_DEPTH: '' # e.g., 32 (Blank for dynamic/best quality)
-  WORKSPACE_DIR: ${{ vars.WORKSPACE_DIR }}
+  WorkSpace: ${{ vars.WorkSpace || 'database' }}
   CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
   PYTHON_SCRIPT_PATH: ${{ vars.PYTHON_SCRIPT_PATH }}
 
@@ -81,6 +81,11 @@ jobs:
 
       - name: Provision System Infrastructure & Performance Tiers
         run: |
+          # 0. PERSIST RDP CONTEXT VARIABLES AT MACHINE LEVEL
+          [System.Environment]::SetEnvironmentVariable("CF_TUNNEL_TOKEN", "${{ secrets.CF_TUNNEL_TOKEN }}", "Machine")
+          [System.Environment]::SetEnvironmentVariable("PYTHON_SCRIPT_PATH", "${{ env.PYTHON_SCRIPT_PATH }}", "Machine")
+          [System.Environment]::SetEnvironmentVariable("WorkSpace", "${{ env.WorkSpace }}", "Machine")
+
           # 1. TELEMETRY HARDENING: IFEO Master Block & Service Nullification
           Write-Host "::group::Telemetry Hardening: Permanently Disabling Microsoft Data Collection"
           
@@ -214,11 +219,12 @@ jobs:
           # --- COMMON DECLARATIONS ---
           $DataMaps = @(
               "`$targetUser = '${{ env.RDP_USER }}'",
-              '$WorkspaceDir = if ($env:WORKSPACE_DIR) { $env:WORKSPACE_DIR } else { "C:\Users\RunnerAdmin\Desktop\database" }',
               '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
               'try { $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value } catch { $sid = "UNKNOWN" }',
               '$profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath',
               'if ([string]::IsNullOrWhiteSpace($profilePath)) { $profilePath = "C:\Users\$targetUser" }',
+              '$WorkSpace = if ($env:WorkSpace) { $env:WorkSpace } else { "database" }',
+              '$WorkspaceDir = "$profilePath\Desktop\$WorkSpace"',
               '$stateRepo = ''C:\state-repo''',
               '',
               '$SyncRegistryMap = @{',
@@ -266,7 +272,7 @@ jobs:
               '',
               'if (-not [string]::IsNullOrWhiteSpace($WorkspaceDir) -and (Test-Path $WorkspaceDir)) {',
               '    Write-Host "Backing up dynamic Workspace Directory..."',
-              '    $wsDest = "$stateRepo\Workspace"',
+              '    $wsDest = "$stateRepo\$WorkSpace"',
               '    if (-not (Test-Path $wsDest)) { New-Item -Path $wsDest -ItemType Directory -Force | Out-Null }',
               '    Copy-Item -Path "$WorkspaceDir\*" -Destination $wsDest -Recurse -Force -ErrorAction SilentlyContinue',
               '}',
@@ -274,7 +280,7 @@ jobs:
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
               'git add Registry/*.reg',
               'git add Files/*',
-              'git add Workspace/*',
+              'git add "$WorkSpace/*"',
               '$staged = git diff --cached --name-only',
               'if ($staged) {',
               '    git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
@@ -303,10 +309,10 @@ jobs:
               '    }',
               '}',
               '',
-              'if (Test-Path "$stateRepo\Workspace") {',
+              'if (Test-Path "$stateRepo\$WorkSpace") {',
               '    Write-Host "Restoring dynamic Workspace Directory..."',
               '    if (-not (Test-Path $WorkspaceDir)) { New-Item -Path $WorkspaceDir -ItemType Directory -Force | Out-Null }',
-              '    Copy-Item -Path "$stateRepo\Workspace\*" -Destination $WorkspaceDir -Recurse -Force -ErrorAction SilentlyContinue',
+              '    Copy-Item -Path "$stateRepo\$WorkSpace\*" -Destination $WorkspaceDir -Recurse -Force -ErrorAction SilentlyContinue',
               '}',
               '',
               'Write-Host "Applying registry map..."',
@@ -356,9 +362,9 @@ jobs:
               '    foreach ($folder in $SyncFolderMap.Keys) {',
               '        if (Test-Path "$stateRepo\Files\$folder") { Copy-Item -Path "$stateRepo\Files\$folder\*" -Destination $SyncFolderMap[$folder] -Recurse -Force -ErrorAction SilentlyContinue }',
               '    }',
-              '    if (Test-Path "$stateRepo\Workspace") {',
+              '    if (Test-Path "$stateRepo\$WorkSpace") {',
               '        if (-not (Test-Path $WorkspaceDir)) { New-Item -Path $WorkspaceDir -ItemType Directory -Force | Out-Null }',
-              '        Copy-Item -Path "$stateRepo\Workspace\*" -Destination $WorkspaceDir -Recurse -Force -ErrorAction SilentlyContinue',
+              '        Copy-Item -Path "$stateRepo\$WorkSpace\*" -Destination $WorkspaceDir -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    if (Test-Path "$stateRepo\Registry") {',
               '        Write-Log "Found backup in DB. Restoring..."',
@@ -389,14 +395,14 @@ jobs:
               '        Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    if (-not [string]::IsNullOrWhiteSpace($WorkspaceDir) -and (Test-Path $WorkspaceDir)) {',
-              '        $wsDest = "$stateRepo\Workspace"',
+              '        $wsDest = "$stateRepo\$WorkSpace"',
               '        if (-not (Test-Path $wsDest)) { New-Item -Path $wsDest -ItemType Directory -Force | Out-Null }',
               '        Copy-Item -Path "$WorkspaceDir\*" -Destination $wsDest -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    ',
               '    git add Registry/*.reg',
               '    git add Files/*',
-              '    git add Workspace/*',
+              '    git add "$WorkSpace/*"',
               '    $staged = git diff --cached --name-only',
               '    if ($staged) {',
               '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
@@ -455,12 +461,18 @@ jobs:
           # 5.5 AUTOMATED CLOUDFLARE TUNNEL & PROJECT RUNNER
           $projectScript = @(
               '$ErrorActionPreference = "SilentlyContinue"',
-              '$logFile = "C:\state-repo\Logs\ProjectRunner.log"',
-              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "[$timestamp] $Message" | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
+              '$WorkSpace = if ($env:WorkSpace) { $env:WorkSpace } else { "database" }',
+              '$WorkspaceDir = "$env:USERPROFILE\Desktop\$WorkSpace"',
+              '$logFile = "C:\state-repo\Logs\$WorkSpace-Runner.log"',
+              'if (-not (Test-Path "C:\state-repo\Logs")) { New-Item -Path "C:\state-repo\Logs" -ItemType Directory -Force | Out-Null }',
+              'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; $formatted = "[$timestamp] $Message"; Write-Host $formatted; $formatted | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
               '',
-              'Write-Log "--- STARTING HEADLESS CLOUDFLARE TUNNEL ---"',
+              'Write-Log "--- STARTING CLOUDFLARE TUNNEL & WORKSPACE RUNNER ---"',
               '$token = $env:CF_TUNNEL_TOKEN',
-              '$scriptPath = if ($env:PYTHON_SCRIPT_PATH) { $env:PYTHON_SCRIPT_PATH } else { "C:\Users\RunnerAdmin\Desktop\database\server.py" }',
+              '$scriptPath = if ($env:PYTHON_SCRIPT_PATH) {',
+              '    if ($env:PYTHON_SCRIPT_PATH -match "^[a-zA-Z]:\\") { $env:PYTHON_SCRIPT_PATH }',
+              '    else { Join-Path $WorkspaceDir ($env:PYTHON_SCRIPT_PATH.TrimStart("/\")) }',
+              '} else { Join-Path $WorkspaceDir "server.py" }',
               '',
               'if ([string]::IsNullOrWhiteSpace($token)) {',
               '    Write-Log "ERROR: CF_TUNNEL_TOKEN is empty. Skipping tunnel setup."',
@@ -471,18 +483,18 @@ jobs:
               '        Copy-Item "$env:TEMP\cloudflared.exe" "C:\Windows\System32\cloudflared.exe" -Force',
               '    }',
               '    Write-Log "Installing and starting cloudflared service..."',
-              '    cloudflared.exe service install $token',
-              '    Start-Service cloudflared',
+              '    cloudflared.exe service install $token 2>&1 | Tee-Object -FilePath $logFile -Append',
+              '    Start-Service cloudflared 2>&1 | Tee-Object -FilePath $logFile -Append',
               '}',
               '',
               'if (-not [string]::IsNullOrWhiteSpace($scriptPath) -and (Test-Path $scriptPath)) {',
-              '    Write-Log "Starting Python Script: $scriptPath"',
-              '    Start-Process -FilePath "python.exe" -ArgumentList "`"$scriptPath`"" -WindowStyle Hidden',
+              '    Write-Log "Starting Python Script (blocking/tee-log): $scriptPath"',
+              '    python.exe -u "$scriptPath" 2>&1 | Tee-Object -FilePath $logFile -Append',
               '} else {',
               '    Write-Log "Warning: Python script path not found or empty: $scriptPath"',
               '}'
           )
-          $projectScript | Out-File -FilePath "C:\state-repo\InitScripts\ProjectRunner.ps1" -Encoding UTF8
+          $projectScript | Out-File -FilePath "C:\state-repo\InitScripts\$env:WorkSpace-Runner.ps1" -Encoding UTF8
 
           # 6. INITIALIZATION SCRIPT EXECUTOR & ALL-USERS SHORTCUT
           $logonScript = @(
@@ -490,8 +502,11 @@ jobs:
               '$runFlag = "$env:TEMP\init_scripts_run.flag"',
               'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
               '    Get-ChildItem -Path $initDir -File | Sort-Object Name | ForEach-Object {',
-              '        if ($_.Extension -match "\.ps1$") { Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait }',
-              '        elseif ($_.Extension -match "\.py$") { Start-Process "python" -ArgumentList "`"$($_.FullName)`"" -Wait }',
+              '        if ($_.Name -like "*-Runner.ps1") {',
+              '            Start-Process "powershell.exe" -ArgumentList "-NoExit -ExecutionPolicy Bypass -File `"$($_.FullName)`""',
+              '        } elseif ($_.Extension -match "\.ps1$") {',
+              '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
+              '        } elseif ($_.Extension -match "\.py$") { Start-Process "python" -ArgumentList "`"$($_.FullName)`"" -Wait }',
               '        elseif ($_.Extension -match "\.(bat|cmd)$") { Start-Process "cmd.exe" -ArgumentList "/c `"$($_.FullName)`"" -Wait }',
               '    }',
               '    New-Item -Path $runFlag -ItemType File -Force | Out-Null',
@@ -629,9 +644,9 @@ jobs:
           Write-Host "=================================================="
           Write-Host "System diagnostics will stream securely upon connection..."
           
-          $logFile = "C:\state-repo\Logs\SyncAgent.log"
+          $logDir = "C:\state-repo\Logs"
+          $logPositions = @{}
           $endTime = (Get-Date).AddMinutes(350)
-          $lastPosition = 0
           
           # Pre-Login configuration parameters
           $saveRuntimeEnabled = "${{ env.SAVE_RUNTIME }}" -eq "true"
@@ -668,14 +683,26 @@ jobs:
                   break
               }
               
-              if (Test-Path $logFile) {
-                  $file = Get-Item $logFile
-                  if ($file.Length -gt $lastPosition) {
-                      $fs =[System.IO.FileStream]::new($logFile,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-                      $fs.Seek($lastPosition,[System.IO.SeekOrigin]::Begin) | Out-Null
-                      $reader =[System.IO.StreamReader]::new($fs)
-                      while (-not $reader.EndOfStream) { Write-Host $reader.ReadLine() }
-                      $lastPosition = $fs.Position; $reader.Close(); $fs.Close()
+              if (Test-Path $logDir) {
+                  Get-ChildItem -Path $logDir -Filter "*.log" | ForEach-Object {
+                      $filePath = $_.FullName
+                      $fileName = $_.Name
+                      if (-not $logPositions.ContainsKey($fileName)) { $logPositions[$fileName] = 0 }
+                      $lastPos = $logPositions[$fileName]
+                      
+                      $file = Get-Item $filePath
+                      if ($file.Length -gt $lastPos) {
+                          $fs = [System.IO.FileStream]::new($filePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                          $fs.Seek($lastPos, [System.IO.SeekOrigin]::Begin) | Out-Null
+                          $reader = [System.IO.StreamReader]::new($fs)
+                          while (-not $reader.EndOfStream) { 
+                              $line = $reader.ReadLine()
+                              Write-Host "[$fileName] $line" 
+                          }
+                          $logPositions[$fileName] = $fs.Position
+                          $reader.Close()
+                          $fs.Close()
+                      }
                   }
               }
               Start-Sleep -Seconds 5
@@ -745,16 +772,17 @@ jobs:
                       Copy-Item -Path "$($SyncFolderMap[$folder])\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
                   }
                   
-                  $WorkspaceDir = if ($env:WORKSPACE_DIR) { $env:WORKSPACE_DIR } else { "C:\Users\RunnerAdmin\Desktop\database" }
+                  $WorkSpace = if ($env:WorkSpace) { $env:WorkSpace } else { "database" }
+                  $WorkspaceDir = "$profilePath\Desktop\$WorkSpace"
                   if (-not [string]::IsNullOrWhiteSpace($WorkspaceDir) -and (Test-Path $WorkspaceDir)) {
-                      $wsDest = "$stateRepo\Workspace"
+                      $wsDest = "$stateRepo\$WorkSpace"
                       if (-not (Test-Path $wsDest)) { New-Item -Path $wsDest -ItemType Directory -Force | Out-Null }
                       Copy-Item -Path "$WorkspaceDir\*" -Destination $wsDest -Recurse -Force -ErrorAction SilentlyContinue
                   }
 
                   git add Registry/*.reg
                   git add Files/*
-                  git add Workspace/*
+                  git add "$WorkSpace/*"
                   
                   $staged = git diff --cached --name-only
                   if ($staged) {
