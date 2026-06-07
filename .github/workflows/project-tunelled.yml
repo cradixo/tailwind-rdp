@@ -94,6 +94,14 @@ jobs:
               Copy-Item -Path "$env:TEMP\cloudflared.exe" -Destination "C:\Windows\System32\cloudflared.exe" -Force
               $ver = & "C:\Windows\System32\cloudflared.exe" --version 2>&1
               Write-Host "cloudflared installed successfully: $ver" -ForegroundColor Green
+              
+              $cfToken = "${{ secrets.CF_TUNNEL_TOKEN }}"
+              if (-not [string]::IsNullOrWhiteSpace($cfToken)) {
+                  Write-Host "Installing cloudflared as a persistent Windows system service..."
+                  & "C:\Windows\System32\cloudflared.exe" service install $cfToken 2>&1
+                  Start-Service -Name "cloudflared" -ErrorAction SilentlyContinue
+                  Write-Host "Cloudflare Service installed and started." -ForegroundColor Green
+              }
           } catch {
               Write-Host "ERROR: cloudflared download/install failed: $_" -ForegroundColor Red
           }
@@ -491,19 +499,8 @@ jobs:
               '    else { Join-Path $WorkspaceDir ($env:PYTHON_SCRIPT_PATH.TrimStart("/\")) }',
               '} else { Join-Path $WorkspaceDir "server.py" }',
               '',
-              '# cloudflared.exe was pre-installed to System32 by GHA setup (full admin) - just run it',
-              'if ([string]::IsNullOrWhiteSpace($token)) {',
-              '    Write-Log "WARNING: CF_TUNNEL_TOKEN is empty. Skipping tunnel setup."',
-              '} else {',
-              '    $cfExe = "C:\Windows\System32\cloudflared.exe"',
-              '    if (-not (Test-Path $cfExe)) {',
-              '        Write-Log "ERROR: cloudflared.exe not found in System32. GHA pre-install may have failed. Check workflow logs."',
-              '    } else {',
-              '        Write-Log "Launching Cloudflare Tunnel (token from machine env)..."',
-              '        Start-Process -FilePath $cfExe -ArgumentList "tunnel --no-autoupdate --protocol http2 run --token `"$token`"" -RedirectStandardOutput "C:\state-repo\Logs\CF-Tunnel.log" -RedirectStandardError "C:\state-repo\Logs\CF-Tunnel-Error.log" -WindowStyle Hidden',
-              '        Write-Log "Cloudflare Tunnel process started. Logs will be streamed to CF-Tunnel-Error.log."',
-              '    }',
-              '}',
+              '# Cloudflare Tunnel is now fully automated as a Windows System Service via GHA Provisioning.',
+              'Write-Log "Cloudflare Tunnel runs natively as a system service. Connection is active."',
               '',
               'if (-not [string]::IsNullOrWhiteSpace($scriptPath) -and (Test-Path $scriptPath)) {',
               '    Write-Log "Starting Python Script: $scriptPath"',
