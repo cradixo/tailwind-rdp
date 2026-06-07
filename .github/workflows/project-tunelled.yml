@@ -417,9 +417,7 @@ jobs:
               '        Copy-Item -Path "$WorkspaceDir\*" -Destination $wsDest -Recurse -Force -ErrorAction SilentlyContinue',
               '    }',
               '    ',
-              '    git add Registry/*.reg',
-              '    git add Files/*',
-              '    git add "$WorkSpace/*"',
+              '    git add --all',
               '    $staged = git diff --cached --name-only',
               '    if ($staged) {',
               '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
@@ -522,7 +520,9 @@ jobs:
           # 6. INITIALIZATION SCRIPT EXECUTOR & ALL-USERS SHORTCUT
           $logonScript = @(
               '$initDir = "C:\state-repo\InitScripts"',
-              '$runFlag = "$env:TEMP\init_scripts_run.flag"',
+              '# Use a stable-per-boot flag so init scripts re-run on every fresh RDP session/reconnect',
+              '$bootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString("yyyyMMdd-HHmm")',
+              '$runFlag = "C:\state-repo\init_ran_$bootTime.flag"',
               'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
               '    Get-ChildItem -Path $initDir -File | Sort-Object Name | ForEach-Object {',
               '        if ($_.Name -like "*-Runner.ps1") {',
