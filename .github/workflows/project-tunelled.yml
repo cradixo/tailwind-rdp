@@ -396,7 +396,7 @@ jobs:
               '    ',
               '    git add Registry/*.reg',
               '    git add Files/*',
-              '    git add Workspace/*'
+              '    git add Workspace/*',
               '    $staged = git diff --cached --name-only',
               '    if ($staged) {',
               '        git commit -m "Auto-save Settings $(Get-Date -Format ''HH:mm:ss'')" --quiet',
