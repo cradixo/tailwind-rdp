@@ -86,6 +86,19 @@ jobs:
           [System.Environment]::SetEnvironmentVariable("PYTHON_SCRIPT_PATH", "${{ env.PYTHON_SCRIPT_PATH }}", "Machine")
           [System.Environment]::SetEnvironmentVariable("WorkSpace", "${{ env.WorkSpace }}", "Machine")
 
+          # 0.5 PRE-INSTALL CLOUDFLARED (GHA runs as full admin - identical pattern to Tailscale)
+          Write-Host "::group::Cloudflare Tunnel: Pre-installing cloudflared.exe to System32"
+          try {
+              Write-Host "Downloading cloudflared.exe from official Cloudflare releases..."
+              Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "$env:TEMP\cloudflared.exe" -UseBasicParsing
+              Copy-Item -Path "$env:TEMP\cloudflared.exe" -Destination "C:\Windows\System32\cloudflared.exe" -Force
+              $ver = & "C:\Windows\System32\cloudflared.exe" --version 2>&1
+              Write-Host "cloudflared installed successfully: $ver" -ForegroundColor Green
+          } catch {
+              Write-Host "ERROR: cloudflared download/install failed: $_" -ForegroundColor Red
+          }
+          Write-Host "::endgroup::"
+
           # 1. TELEMETRY HARDENING: IFEO Master Block & Service Nullification
           Write-Host "::group::Telemetry Hardening: Permanently Disabling Microsoft Data Collection"
           
@@ -217,14 +230,20 @@ jobs:
           $agentPath = "C:\state-repo\StateSync.ps1"
           
           # --- COMMON DECLARATIONS ---
+          # NOTE: Scripts that run as the actual logged-in user (cardersparadox) MUST use
+          # $env:USERPROFILE to get their own Desktop path - NOT the GHA-created RunnerAdmin path.
+          # $targetUser / $profilePath / $sid are kept ONLY for registry export (HKEY_USERS\$sid).
           $DataMaps = @(
               "`$targetUser = '${{ env.RDP_USER }}'",
               '$User = New-Object System.Security.Principal.NTAccount($targetUser)',
               'try { $sid = $User.Translate([System.Security.Principal.SecurityIdentifier]).value } catch { $sid = "UNKNOWN" }',
               '$profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name "ProfileImagePath" -ErrorAction SilentlyContinue).ProfileImagePath',
               'if ([string]::IsNullOrWhiteSpace($profilePath)) { $profilePath = "C:\Users\$targetUser" }',
+              '# CRITICAL: WorkspaceDir MUST use $env:USERPROFILE (the actual running user)',
+              '# NOT $profilePath which points to the GHA RunnerAdmin account.',
               '$WorkSpace = if ($env:WorkSpace) { $env:WorkSpace } else { "database" }',
-              '$WorkspaceDir = "$profilePath\Desktop\$WorkSpace"',
+              '$WorkspaceDir = "$env:USERPROFILE\Desktop\$WorkSpace"',
+              'if (-not (Test-Path $WorkspaceDir)) { New-Item -Path $WorkspaceDir -ItemType Directory -Force | Out-Null }',
               '$stateRepo = ''C:\state-repo''',
               '',
               '$SyncRegistryMap = @{',
@@ -236,8 +255,8 @@ jobs:
               '}',
               '',
               '$SyncFolderMap = @{',
-              '    "LocalAppDataThemes" = "$profilePath\AppData\Local\Microsoft\Windows\Themes"',
-              '    "AppDataThemes"      = "$profilePath\AppData\Roaming\Microsoft\Windows\Themes"',
+              '    "LocalAppDataThemes" = "$env:USERPROFILE\AppData\Local\Microsoft\Windows\Themes"',
+              '    "AppDataThemes"      = "$env:USERPROFILE\AppData\Roaming\Microsoft\Windows\Themes"',
               '}'
           )
           
@@ -278,9 +297,7 @@ jobs:
               '}',
               '',
               'Write-Host "Committing and Pushing to Database (GitHub)..."',
-              'git add Registry/*.reg',
-              'git add Files/*',
-              'git add "$WorkSpace/*"',
+              'git add --all',
               '$staged = git diff --cached --name-only',
               'if ($staged) {',
               '    git commit -m "Manual Backup $(Get-Date -Format ''HH:mm:ss'')"',
@@ -469,35 +486,35 @@ jobs:
               'function Write-Log { param([string]$Message); $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; $formatted = "[$timestamp] $Message"; Write-Host $formatted; $formatted | Out-File -FilePath $logFile -Append -Encoding UTF8 }',
               '',
               'Write-Log "--- STARTING CLOUDFLARE TUNNEL & WORKSPACE RUNNER ---"',
-              'Write-Log "Workspace Directory: $WorkspaceDir"',
+              'Write-Log "Running as user: $env:USERNAME | Workspace: $WorkspaceDir"',
               '$token = $env:CF_TUNNEL_TOKEN',
               '$scriptPath = if ($env:PYTHON_SCRIPT_PATH) {',
               '    if ($env:PYTHON_SCRIPT_PATH -match "^[a-zA-Z]:\\") { $env:PYTHON_SCRIPT_PATH }',
               '    else { Join-Path $WorkspaceDir ($env:PYTHON_SCRIPT_PATH.TrimStart("/\")) }',
               '} else { Join-Path $WorkspaceDir "server.py" }',
               '',
+              '# cloudflared.exe was pre-installed to System32 by GHA setup (full admin) - just run it',
               'if ([string]::IsNullOrWhiteSpace($token)) {',
-              '    Write-Log "ERROR: CF_TUNNEL_TOKEN is empty. Skipping tunnel setup."',
+              '    Write-Log "WARNING: CF_TUNNEL_TOKEN is empty. Skipping tunnel setup."',
               '} else {',
-              '    $cfPath = "$env:USERPROFILE\cloudflared.exe"',
-              '    if (-not (Test-Path $cfPath)) {',
-              '        Write-Log "Downloading cloudflared.exe (No Admin Required)..."',
-              '        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cfPath',
+              '    $cfExe = "C:\Windows\System32\cloudflared.exe"',
+              '    if (-not (Test-Path $cfExe)) {',
+              '        Write-Log "ERROR: cloudflared.exe not found in System32. GHA pre-install may have failed. Check workflow logs."',
+              '    } else {',
+              '        Write-Log "Launching Cloudflare Tunnel (token from machine env)..."',
+              '        Start-Process -FilePath $cfExe -ArgumentList "tunnel --no-autoupdate run --token `"$token`"" -WindowStyle Normal',
+              '        Write-Log "Cloudflare Tunnel process started. Check the new window for connection status."',
               '    }',
-              '    Write-Log "Starting Cloudflare Tunnel in a separate visible window..."',
-              '    $cfArgs = "tunnel --no-autoupdate run --token $token"',
-              '    Start-Process -FilePath $cfPath -ArgumentList $cfArgs -WindowStyle Normal',
-              '    Write-Log "Cloudflare Tunnel launched successfully!"',
               '}',
               '',
               'if (-not [string]::IsNullOrWhiteSpace($scriptPath) -and (Test-Path $scriptPath)) {',
-              '    Write-Log "Starting Python Script (blocking/tee-log): $scriptPath"',
-              '    try { python.exe -u "$scriptPath" 2>&1 | Tee-Object -FilePath $logFile -Append } catch { Write-Log "Python script execution failed." }',
+              '    Write-Log "Starting Python Script: $scriptPath"',
+              '    try { python.exe -u "$scriptPath" 2>&1 | Tee-Object -FilePath $logFile -Append } catch { Write-Log "Python script execution failed: $_" }',
               '} else {',
-              '    Write-Log "Warning: Python script not found at: $scriptPath"',
+              '    Write-Log "INFO: Python script not found at: $scriptPath (skipping)"',
               '}',
               '',
-              'Write-Log "Project Runner execution complete. Keeping terminal open for monitoring..."',
+              'Write-Log "Runner idle loop active. Terminal will stay open. Close manually when done."',
               'while($true) { Start-Sleep -Seconds 60 }'
           )
           $projectScript | Out-File -FilePath "C:\state-repo\InitScripts\$env:WorkSpace-Runner.ps1" -Encoding UTF8
