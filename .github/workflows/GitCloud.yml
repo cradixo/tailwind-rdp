@@ -68,11 +68,16 @@ jobs:
               '$runFlag = "C:\state-repo\init_ran_$bootTime.flag"',
               'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
               '    Get-ChildItem -Path $initDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {',
-              '        Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
+              '        if ($_.Name -like "00-*") {',
+              '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
+              '        } else {',
+              '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`""',
+              '        }',
               '    }',
               '    New-Item -Path $runFlag -ItemType File -Force | Out-Null',
               '}'
           )
+
           $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
           
           $startupFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
