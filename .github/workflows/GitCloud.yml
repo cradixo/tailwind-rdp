@@ -51,13 +51,6 @@ jobs:
           Write-Host "Cloud Repo connection established." -ForegroundColor Green
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
 
-      - name: Provision System Infrastructure & Performance Tiers
-        shell: powershell
-        run: |
-          if (Test-Path "C:\state-repo\Repository\Privileged\01-Optimize-OS.ps1") {
-              & "C:\state-repo\Repository\Privileged\01-Optimize-OS.ps1"
-          } else { Write-Warning "01-Optimize-OS.ps1 not found in Cloud Repo." }
-
       - name: Provision Local Administrator Account
         shell: powershell
         run: |
@@ -90,19 +83,20 @@ jobs:
           $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
           $Shortcut.Save()
 
-      - name: Initialize Secure Mesh Overlay (Tailscale)
+      - name: Execute Privileged Provisioning Scripts
         shell: powershell
         run: |
-          if (Test-Path "C:\state-repo\Repository\Privileged\02-Install-VPN.ps1") {
-              & "C:\state-repo\Repository\Privileged\02-Install-VPN.ps1"
-          } else { Write-Warning "02-Install-VPN.ps1 not found in Cloud Repo." }
+          $privilegedDir = "C:\state-repo\Repository\Privileged"
+          if (Test-Path $privilegedDir) {
+              Get-ChildItem -Path $privilegedDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
+                  Write-Host "::group::Executing Privileged Script: $($_.Name)"
+                  & $_.FullName
+                  Write-Host "::endgroup::"
+              }
+          } else {
+              Write-Warning "Privileged scripts directory not found."
+          }
 
-      - name: Initialize Web Tunnels (Cloudflare)
-        shell: powershell
-        run: |
-          if (Test-Path "C:\state-repo\Repository\Privileged\03-Install-Tunnel.ps1") {
-              & "C:\state-repo\Repository\Privileged\03-Install-Tunnel.ps1"
-          } else { Write-Warning "03-Install-Tunnel.ps1 not found in Cloud Repo." }
 
       - name: Execute Interactive Runtime & Telemetry Stream
         shell: powershell
