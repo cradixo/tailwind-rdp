@@ -129,6 +129,17 @@ jobs:
           $startTime = Get-Date
           $isLoggedIn = $false
           
+          # Pre-seed log positions to current EOF of every existing log file.
+          # This prevents historical log content (from previous sessions persisted in git)
+          # from being replayed into this session's GHA output.
+          if (Test-Path $logDir) {
+              Get-ChildItem -Path $logDir -Filter "*.log" | ForEach-Object {
+                  $logPositions[$_.Name] = $_.Length
+                  Write-Host "[TELEMETRY] Skipping $($_.Length) bytes of historical log in $($_.Name)"
+              }
+          }
+          Write-Host "[TELEMETRY] Log baseline captured. Only live output from this session will be streamed."
+          
           while ((Get-Date) -lt $endTime) {
               if ($saveRuntimeEnabled -and -not $isLoggedIn) {
                   $qwinsta = qwinsta 2>&1 | Out-String
@@ -152,7 +163,7 @@ jobs:
                   Get-ChildItem -Path $logDir -Filter "*.log" | ForEach-Object {
                       $filePath = $_.FullName
                       $fileName = $_.Name
-                      if (-not $logPositions.ContainsKey($fileName)) { $logPositions[$fileName] = 0 }
+                      if (-not $logPositions.ContainsKey($fileName)) { $logPositions[$fileName] = $_.Length }
                       $lastPos = $logPositions[$fileName]
                       
                       $file = Get-Item $filePath
