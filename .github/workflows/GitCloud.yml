@@ -1,0 +1,184 @@
+name: RDP-Static-Persistent-Final
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Parse ENV_CONFIG Single-Secret
+        shell: powershell
+        env:
+          ENV_CONFIG: ${{ secrets.ENV_CONFIG }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ENV_CONFIG)) { Write-Error "ENV_CONFIG secret is missing or empty!"; exit 1 }
+          $lines = $env:ENV_CONFIG -split "`n"
+          foreach ($line in $lines) {
+              $line = $line.Trim()
+              if ($line -and -not $line.StartsWith("#")) {
+                  $parts = $line -split "=", 2
+                  if ($parts.Length -eq 2) {
+                      $key = $parts[0].Trim()
+                      $value = $parts[1].Trim()
+                      # Masking the value
+                      echo "::add-mask::$value"
+                      # Exporting to GitHub Env
+                      echo "$key=$value" >> $env:GITHUB_ENV
+                      # Set Machine-level variable for RDP session inheritance
+                      [System.Environment]::SetEnvironmentVariable($key, $value, "Machine")
+                  }
+              }
+          }
+
+      - name: Checkout Cloud Repository (Database & Scripts)
+        shell: powershell
+        run: |
+          Write-Host "Authenticating to Cloud Database: $($env:BACKUP_DB_USER)/$($env:BACKUP_DB_REPO)"
+          $repoUrl = "https://$($env:BACKUP_DB_USER):$($env:BACKUP_DB_PAT)@github.com/$($env:BACKUP_DB_USER)/$($env:BACKUP_DB_REPO).git"
+          
+          $cloneOutput = cmd.exe /c "git clone -q `"$repoUrl`" C:\state-repo 2>&1"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "C:\state-repo\.git")) {
+              Write-Error "CRITICAL: Access to Cloud Repo denied. Check if BACKUP_DB_PAT is expired!"
+              exit 1 
+          }
+          Write-Host "Cloud Repo connection established." -ForegroundColor Green
+          icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
+
+      - name: Provision System Infrastructure & Performance Tiers
+        shell: powershell
+        run: |
+          if (Test-Path "C:\state-repo\Repository\Privileged\01-Optimize-OS.ps1") {
+              & "C:\state-repo\Repository\Privileged\01-Optimize-OS.ps1"
+          } else { Write-Warning "01-Optimize-OS.ps1 not found in Cloud Repo." }
+
+      - name: Provision Local Administrator Account
+        shell: powershell
+        run: |
+          $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
+          New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USERNAME"
+
+      - name: Initialize Logon Hooks & Background Daemons
+        shell: powershell
+        run: |
+          $logonScript = @(
+              '$initDir = "C:\state-repo\Repository\Initialized"',
+              '$bootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString("yyyyMMdd-HHmm")',
+              '$runFlag = "C:\state-repo\init_ran_$bootTime.flag"',
+              'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
+              '    Get-ChildItem -Path $initDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {',
+              '        Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
+              '    }',
+              '    New-Item -Path $runFlag -ItemType File -Force | Out-Null',
+              '}'
+          )
+          $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
+          
+          $startupFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+          if (-not (Test-Path $startupFolder)) { New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
+          $WshShell = New-Object -comObject WScript.Shell
+          $Shortcut = $WshShell.CreateShortcut("$startupFolder\InitScriptsHook.lnk")
+          $Shortcut.TargetPath = "powershell.exe"
+          $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
+          $Shortcut.Save()
+
+      - name: Initialize Secure Mesh Overlay (Tailscale)
+        shell: powershell
+        run: |
+          if (Test-Path "C:\state-repo\Repository\Privileged\02-Install-VPN.ps1") {
+              & "C:\state-repo\Repository\Privileged\02-Install-VPN.ps1"
+          } else { Write-Warning "02-Install-VPN.ps1 not found in Cloud Repo." }
+
+      - name: Initialize Web Tunnels (Cloudflare)
+        shell: powershell
+        run: |
+          if (Test-Path "C:\state-repo\Repository\Privileged\03-Install-Tunnel.ps1") {
+              & "C:\state-repo\Repository\Privileged\03-Install-Tunnel.ps1"
+          } else { Write-Warning "03-Install-Tunnel.ps1 not found in Cloud Repo." }
+
+      - name: Execute Interactive Runtime & Telemetry Stream
+        shell: powershell
+        run: |
+          Write-Host "================ SECURE VPN ENTRY ================"
+          Write-Host "Routing IP : $env:TAILSCALE_IP"
+          Write-Host "Identifier : $env:RDP_USERNAME"
+          Write-Host "=================================================="
+          Write-Host "System diagnostics will stream securely upon connection..."
+          
+          $logDir = "C:\state-repo\Logs"
+          $logPositions = @{}
+          $endTime = (Get-Date).AddMinutes(350)
+          
+          $saveRuntimeEnabled = "$env:SAVE_RUNTIME" -eq "true"
+          
+          $timeoutStr = $env:IDLE_TIMEOUT_MIN
+          if ([string]::IsNullOrWhiteSpace($timeoutStr)) { $timeoutStr = "3" }
+          $idleTimeoutSeconds = [int]$timeoutStr * 60
+          
+          $startTime = Get-Date
+          $isLoggedIn = $false
+          
+          while ((Get-Date) -lt $endTime) {
+              if ($saveRuntimeEnabled -and -not $isLoggedIn) {
+                  $qwinsta = qwinsta 2>&1 | Out-String
+                  if ($qwinsta -match "rdp-tcp#.*Active") {
+                      $isLoggedIn = $true
+                      Write-Host "`n[SUCCESS] RDP Connection established. Handing over idle monitoring to interactive daemon..." -ForegroundColor Green
+                  } elseif (((Get-Date) - $startTime).TotalSeconds -gt $idleTimeoutSeconds) {
+                      Write-Host "`n[ALERT] Pre-Login Timeout Reached! No RDP connection was established within $timeoutStr minutes." -ForegroundColor Yellow
+                      Write-Host "::notice::Workflow completion triggered by Idle Timeout (Pre-Login)."
+                      break
+                  }
+              }
+              
+              if (Test-Path "C:\state-repo\end_run.flag") {
+                  Write-Host "`n[ALERT] Post-Login User Idle Timeout Reached! Gracefully finishing workflow..." -ForegroundColor Yellow
+                  Write-Host "::notice::Workflow completion triggered by User Idle Timeout."
+                  break
+              }
+              
+              if (Test-Path $logDir) {
+                  Get-ChildItem -Path $logDir -Filter "*.log" | ForEach-Object {
+                      $filePath = $_.FullName
+                      $fileName = $_.Name
+                      if (-not $logPositions.ContainsKey($fileName)) { $logPositions[$fileName] = 0 }
+                      $lastPos = $logPositions[$fileName]
+                      
+                      $file = Get-Item $filePath
+                      if ($file.Length -gt $lastPos) {
+                          $fs = [System.IO.FileStream]::new($filePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                          $fs.Seek($lastPos, [System.IO.SeekOrigin]::Begin) | Out-Null
+                          $reader = [System.IO.StreamReader]::new($fs)
+                          while (-not $reader.EndOfStream) { 
+                              $line = $reader.ReadLine()
+                              Write-Host "[$fileName] $line" 
+                          }
+                          $logPositions[$fileName] = $fs.Position
+                          $reader.Close()
+                          $fs.Close()
+                      }
+                  }
+              }
+              Start-Sleep -Seconds 5
+          }
+
+      - name: Finalize Session Persistence & State Synchronization
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
+          $stateRepo = 'C:\state-repo'
+          if (-not (Test-Path $stateRepo)) { exit 0 }
+          
+          if (Test-Path "$stateRepo\Repository\Essentials\Force-Backup.ps1") {
+              Write-Host "Executing Final Backup..."
+              & "$stateRepo\Repository\Essentials\Force-Backup.ps1"
+          }
