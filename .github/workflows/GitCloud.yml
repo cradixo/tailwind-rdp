@@ -68,7 +68,7 @@ jobs:
               '$runFlag = "C:\state-repo\init_ran_$bootTime.flag"',
               'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
               '    Get-ChildItem -Path $initDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {',
-              '        if ($_.Name -like "00-*") {',
+              '        if ($_.Name -eq "00-StateRestore.ps1") {',
               '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
               '        } else {',
               '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`""',
@@ -77,16 +77,14 @@ jobs:
               '    New-Item -Path $runFlag -ItemType File -Force | Out-Null',
               '}'
           )
-
           $logonScript | Out-File -FilePath "C:\state-repo\Run-InitScripts.ps1" -Encoding UTF8
           
-          $startupFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
-          if (-not (Test-Path $startupFolder)) { New-Item -Path $startupFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
-          $WshShell = New-Object -comObject WScript.Shell
-          $Shortcut = $WshShell.CreateShortcut("$startupFolder\InitScriptsHook.lnk")
-          $Shortcut.TargetPath = "powershell.exe"
-          $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
-          $Shortcut.Save()
+          # Register Scheduled Task to trigger immediately on logon of the RDP user
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\state-repo\Run-InitScripts.ps1"
+          $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:RDP_USERNAME"
+          $principal = New-ScheduledTaskPrincipal -UserId "$env:RDP_USERNAME" -RunLevel Highest
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+          Register-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -TaskName "RDPLogonInit" -Force
 
       - name: Execute Privileged Provisioning Scripts
         shell: powershell
