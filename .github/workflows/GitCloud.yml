@@ -50,6 +50,12 @@ jobs:
           }
           Write-Host "Cloud Repo connection established." -ForegroundColor Green
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
+          
+          # Clean up any residual lifecycle flags from previous sessions
+          if (Test-Path "C:\state-repo\end_run.flag") {
+              Remove-Item "C:\state-repo\end_run.flag" -Force -ErrorAction SilentlyContinue
+              Write-Host "Wiped residual end_run.flag from state-repo."
+          }
 
       - name: Provision Local Administrator Account
         shell: powershell
