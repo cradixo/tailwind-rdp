@@ -19,23 +19,51 @@ jobs:
           ENV_CONFIG: ${{ secrets.ENV_CONFIG }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:ENV_CONFIG)) { Write-Error "ENV_CONFIG secret is missing or empty!"; exit 1 }
-          $lines = $env:ENV_CONFIG -split "`n"
-          foreach ($line in $lines) {
-              $line = $line.Trim()
-              if ($line -and -not $line.StartsWith("#")) {
+          $trimmed = $env:ENV_CONFIG.Trim()
+          if ($trimmed.StartsWith("{")) {
+              try {
+                  $config = $trimmed | ConvertFrom-Json -ErrorAction Stop
+                  foreach ($prop in $config.PSObject.Properties) {
+                      $key = $prop.Name
+                      $val = $prop.Value
+                      if ($key -eq "install") {
+                          foreach ($subProp in $val.PSObject.Properties) {
+                              $subKey = "INSTALL_" + $subProp.Name.ToUpper()
+                              $subVal = $subProp.Value.ToString().ToLower()
+                              echo "::add-mask::$subVal"
+                              echo "$subKey=$subVal" >> $env:GITHUB_ENV
+                              [System.Environment]::SetEnvironmentVariable($subKey, $subVal, "Machine")
+                          }
+                      } else {
+                          $valStr = $val.ToString()
+                          echo "::add-mask::$valStr"
+                          echo "$key=$valStr" >> $env:GITHUB_ENV
+                          [System.Environment]::SetEnvironmentVariable($key, $valStr, "Machine")
+                      }
+                  }
+              } catch {
+                  Write-Error "Failed to parse JSON configuration: $_"
+                  exit 1
+              }
+          } else {
+              $lines = $trimmed -split "\r?\n"
+              foreach ($line in $lines) {
+                  if ([string]::IsNullOrWhiteSpace($line) -or $line.Trim().StartsWith("#")) { continue }
                   $parts = $line -split "=", 2
                   if ($parts.Length -eq 2) {
                       $key = $parts[0].Trim()
-                      $value = $parts[1].Trim()
-                      # Masking the value
+                      $value = $parts[1]
+                      if (($value.Length -ge 2) -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+                          $value = $value.Substring(1, $value.Length - 2)
+                      }
+                      if ([string]::IsNullOrWhiteSpace($value)) { continue }
                       echo "::add-mask::$value"
-                      # Exporting to GitHub Env
                       echo "$key=$value" >> $env:GITHUB_ENV
-                      # Set Machine-level variable for RDP session inheritance
                       [System.Environment]::SetEnvironmentVariable($key, $value, "Machine")
                   }
               }
           }
+
 
       - name: Checkout Cloud Repository (Database & Scripts)
         shell: powershell
@@ -74,10 +102,21 @@ jobs:
               '$runFlag = "C:\state-repo\init_ran_$bootTime.flag"',
               'if ((Test-Path $initDir) -and -not (Test-Path $runFlag)) {',
               '    Get-ChildItem -Path $initDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {',
-              '        if ($_.Name -eq "00-StateRestore.ps1") {',
-              '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
-              '        } else {',
-              '            Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`""',
+              '        $runScript = $true',
+              '        if ($_.Name -match "(?i)(?:^|\d+-)?Install-([A-Za-z0-9_-]+)\.ps1$") {',
+              '            $appName = $Matches[1].ToLower()',
+              '            $envVarName = "INSTALL_" + $appName.ToUpper()',
+              '            $toggleVal = [System.Environment]::GetEnvironmentVariable($envVarName, "Machine")',
+              '            if ($toggleVal -ne "true") {',
+              '                $runScript = $false',
+              '            }',
+              '        }',
+              '        if ($runScript) {',
+              '            if ($_.Name -eq "00-StateRestore.ps1") {',
+              '                Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`"" -Wait',
+              '            } else {',
+              '                Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($_.FullName)`""',
+              '            }',
               '        }',
               '    }',
               '    New-Item -Path $runFlag -ItemType File -Force | Out-Null',
@@ -98,9 +137,21 @@ jobs:
           $privilegedDir = "C:\state-repo\Repository\Privileged"
           if (Test-Path $privilegedDir) {
               Get-ChildItem -Path $privilegedDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
-                  Write-Host "::group::Executing Privileged Script: $($_.Name)"
-                  & $_.FullName
-                  Write-Host "::endgroup::"
+                  $runScript = $true
+                  if ($_.Name -match "(?i)(?:^|\d+-)?Install-([A-Za-z0-9_-]+)\.ps1$") {
+                      $appName = $Matches[1].ToLower()
+                      $envVarName = "INSTALL_" + $appName.ToUpper()
+                      $toggleVal = [System.Environment]::GetEnvironmentVariable($envVarName, "Machine")
+                      if ($toggleVal -ne "true") {
+                          Write-Host "Skipping Privileged Installer: $($_.Name) (as $envVarName is not set to 'true')"
+                          $runScript = $false
+                      }
+                  }
+                  if ($runScript) {
+                      Write-Host "::group::Executing Privileged Script: $($_.Name)"
+                      & $_.FullName
+                      Write-Host "::endgroup::"
+                  }
               }
           } else {
               Write-Warning "Privileged scripts directory not found."
