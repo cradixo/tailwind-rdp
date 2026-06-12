@@ -79,7 +79,7 @@ jobs:
           $envVarName = "INSTALL_VPN"
           $toggleVal = [System.Environment]::GetEnvironmentVariable($envVarName, "Machine")
           if ($toggleVal -ne "true") {
-              Write-Host "Skipping Tailscale VPN installation (as $envVarName is not set to 'true')"
+              Write-Host "Skipping Tailscale VPN installation."
               exit 0
           }
           
@@ -216,7 +216,7 @@ jobs:
                       $envVarName = "INSTALL_" + $appName.ToUpper()
                       $toggleVal = [System.Environment]::GetEnvironmentVariable($envVarName, "Machine")
                       if ($toggleVal -ne "true") {
-                          Write-Host "Skipping Privileged Installer: $($_.Name) (as $envVarName is not set to 'true')"
+                          Write-Host "Skipping Privileged Installer: $($_.Name)"
                           $runScript = $false
                       }
                   }
