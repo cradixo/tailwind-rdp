@@ -36,9 +36,10 @@ jobs:
                               echo "$subKey=$subVal" >> $env:GITHUB_ENV
                               [System.Environment]::SetEnvironmentVariable($subKey, $subVal, "Machine")
                           }
-                      } else {
+                       } else {
                           $valStr = $val.ToString()
-                          if ($key -match "PAT|PASSWORD|TOKEN|KEY|SECRET") {
+                          $valLower = $valStr.ToLower()
+                          if ($valLower -ne "true" -and $valLower -ne "false" -and $valStr -notmatch '^\d+$' -and $valStr.Length -ge 3) {
                               echo "::add-mask::$valStr"
                           }
                           echo "$key=$valStr" >> $env:GITHUB_ENV
@@ -61,7 +62,8 @@ jobs:
                           $value = $value.Substring(1, $value.Length - 2)
                       }
                       if ([string]::IsNullOrWhiteSpace($value)) { continue }
-                      if ($key -match "PAT|PASSWORD|TOKEN|KEY|SECRET") {
+                      $valLower = $value.ToLower()
+                      if ($valLower -ne "true" -and $valLower -ne "false" -and $value -notmatch '^\d+$' -and $value.Length -ge 3) {
                           echo "::add-mask::$value"
                       }
                       echo "$key=$value" >> $env:GITHUB_ENV
@@ -138,7 +140,7 @@ jobs:
       - name: Checkout Cloud Repository (Database & Scripts)
         shell: powershell
         run: |
-          Write-Host "Authenticating to Cloud Database: $($env:BACKUP_DB_USER)/$($env:BACKUP_DB_REPO)"
+          Write-Host "Authenticating to Cloud Database..."
           $repoUrl = "https://$($env:BACKUP_DB_USER):$($env:BACKUP_DB_PAT)@github.com/$($env:BACKUP_DB_USER)/$($env:BACKUP_DB_REPO).git"
           
           $cloneOutput = cmd.exe /c "git clone -q `"$repoUrl`" C:\state-repo 2>&1"
@@ -324,3 +326,22 @@ jobs:
               Write-Host "Executing Final Backup..."
               & "$stateRepo\Repository\Essentials\Force-Backup.ps1"
           }
+
+          # Forcibly log off RDP sessions to close interactive user locks
+          Write-Host "Querying and terminating interactive RDP sessions..."
+          $sessions = qwinsta 2>&1
+          foreach ($line in $sessions) {
+              if ($line -match "\s+(\d+)\s+(Active|Disc)") {
+                  $sessId = $Matches[1]
+                  if ($sessId -ne 0) {
+                      Write-Host "Logging off Session $sessId..."
+                      logoff $sessId /v
+                  }
+              }
+          }
+
+          # Kill lingering background processes to prevent the GHA runner from hanging
+          Write-Host "Cleaning up lingering background processes..."
+          Get-Process -Name "powershell", "pwsh", "python", "cmd" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Id -ne $PID } |
+              Stop-Process -Force -ErrorAction SilentlyContinue
