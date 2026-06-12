@@ -137,14 +137,6 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "::endgroup::"
 
-      - name: Provision Local Administrator Account
-        shell: powershell
-        run: |
-          $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
-          New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USERNAME"
-
       - name: Checkout Cloud Repository (Database & Scripts)
         shell: powershell
         run: |
@@ -164,6 +156,14 @@ jobs:
               Remove-Item "C:\state-repo\end_run.flag" -Force -ErrorAction SilentlyContinue
               Write-Host "Wiped residual end_run.flag from state-repo."
           }
+
+      - name: Provision Local Administrator Account
+        shell: powershell
+        run: |
+          $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
+          New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USERNAME"
 
 
       - name: Initialize Logon Hooks & Background Daemons
@@ -318,8 +318,7 @@ jobs:
           
           if (-not (Test-Path "$stateRepo\end_run.flag")) {
               Write-Host "Broadcasting end_run.flag to workspace projects for graceful shutdown..."
-              New-Item -Path "$stateRepo\end_run.flag" -ItemType F
-              ile -Force | Out-Null
+              New-Item -Path "$stateRepo\end_run.flag" -ItemType File -Force | Out-Null
           }
           Write-Host "Waiting 30 seconds for gracefully exiting processes..."
           Start-Sleep -Seconds 30
