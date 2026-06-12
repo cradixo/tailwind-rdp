@@ -137,6 +137,14 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "::endgroup::"
 
+      - name: Provision Local Administrator Account
+        shell: powershell
+        run: |
+          $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
+          New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USERNAME"
+
       - name: Checkout Cloud Repository (Database & Scripts)
         shell: powershell
         run: |
@@ -157,13 +165,6 @@ jobs:
               Write-Host "Wiped residual end_run.flag from state-repo."
           }
 
-      - name: Provision Local Administrator Account
-        shell: powershell
-        run: |
-          $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
-          New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USERNAME"
 
       - name: Initialize Logon Hooks & Background Daemons
         shell: powershell
@@ -317,7 +318,8 @@ jobs:
           
           if (-not (Test-Path "$stateRepo\end_run.flag")) {
               Write-Host "Broadcasting end_run.flag to workspace projects for graceful shutdown..."
-              New-Item -Path "$stateRepo\end_run.flag" -ItemType File -Force | Out-Null
+              New-Item -Path "$stateRepo\end_run.flag" -ItemType F
+              ile -Force | Out-Null
           }
           Write-Host "Waiting 30 seconds for gracefully exiting processes..."
           Start-Sleep -Seconds 30
@@ -327,21 +329,14 @@ jobs:
               & "$stateRepo\Repository\Essentials\Force-Backup.ps1"
           }
 
-          # Forcibly log off RDP sessions to close interactive user locks
-          Write-Host "Querying and terminating interactive RDP sessions..."
-          $sessions = qwinsta 2>&1
-          foreach ($line in $sessions) {
-              if ($line -match "\s+(\d+)\s+(Active|Disc)") {
-                  $sessId = $Matches[1]
-                  if ($sessId -ne 0) {
-                      Write-Host "Logging off Session $sessId..."
-                      logoff $sessId /v
-                  }
-              }
-          }
-
-          # Kill lingering background processes to prevent the GHA runner from hanging
+          # Kill lingering background processes spawned by the RDP session
+          # (sync daemon, idle monitor, project runners) so the GHA runner can exit cleanly.
+          # NOTE: We do NOT call 'logoff' here — logoff terminates the Windows session that
+          #       owns the GHA runner process tree, causing the workflow to hang without
+          #       ever reporting completion to GitHub.
           Write-Host "Cleaning up lingering background processes..."
           Get-Process -Name "powershell", "pwsh", "python", "cmd" -ErrorAction SilentlyContinue |
               Where-Object { $_.Id -ne $PID } |
               Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "Teardown complete."
+
