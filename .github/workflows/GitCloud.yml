@@ -33,7 +33,6 @@ jobs:
                               if ($subVal.Length -gt 4 -and $subVal -ne "true" -and $subVal -ne "false") {
                                   echo "::add-mask::$subVal"
                               }
-                              echo "$subKey=$subVal" >> $env:GITHUB_ENV
                               [System.Environment]::SetEnvironmentVariable($subKey, $subVal, "Machine")
                           }
                        } else {
@@ -42,7 +41,6 @@ jobs:
                           if ($valLower -ne "true" -and $valLower -ne "false" -and $valStr -notmatch '^\d+$' -and $valStr.Length -ge 3) {
                               echo "::add-mask::$valStr"
                           }
-                          echo "$key=$valStr" >> $env:GITHUB_ENV
                           [System.Environment]::SetEnvironmentVariable($key, $valStr, "Machine")
                       }
                   }
@@ -66,7 +64,6 @@ jobs:
                       if ($valLower -ne "true" -and $valLower -ne "false" -and $value -notmatch '^\d+$' -and $value.Length -ge 3) {
                           echo "::add-mask::$value"
                       }
-                      echo "$key=$value" >> $env:GITHUB_ENV
                       [System.Environment]::SetEnvironmentVariable($key, $value, "Machine")
                   }
               }
@@ -76,6 +73,7 @@ jobs:
       - name: Install & Authenticate Tailscale VPN
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           $envVarName = "INSTALL_VPN"
           $toggleVal = [System.Environment]::GetEnvironmentVariable($envVarName, "Machine")
           if ($toggleVal -ne "true") {
@@ -134,12 +132,13 @@ jobs:
           }
           
           Write-Host "Tailscale routing initialized successfully. Assigned IP: $tsIP" -ForegroundColor Green
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          [System.Environment]::SetEnvironmentVariable("TAILSCALE_IP", $tsIP, "Machine")
           Write-Host "::endgroup::"
 
       - name: Checkout Cloud Repository (Database & Scripts)
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           Write-Host "Authenticating to Cloud Database..."
           $repoUrl = "https://$($env:BACKUP_DB_USER):$($env:BACKUP_DB_PAT)@github.com/$($env:BACKUP_DB_USER)/$($env:BACKUP_DB_REPO).git"
           
@@ -164,6 +163,7 @@ jobs:
       - name: Provision Local Administrator Account
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
@@ -173,6 +173,7 @@ jobs:
       - name: Initialize Logon Hooks & Background Daemons
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           $logonScript = @(
               '$initDir = "C:\state-repo\Repository\Initialized"',
               '$bootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString("yyyyMMdd-HHmm")',
@@ -211,6 +212,7 @@ jobs:
       - name: Execute Privileged Provisioning Scripts
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           $privilegedDir = "C:\state-repo\Repository\Privileged"
           if (Test-Path $privilegedDir) {
               Get-ChildItem -Path $privilegedDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
@@ -238,6 +240,7 @@ jobs:
       - name: Execute Interactive Runtime & Telemetry Stream
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           Write-Host "================ SECURE VPN ENTRY ================"
           Write-Host "Routing IP : $env:TAILSCALE_IP"
           Write-Host "Identifier : $env:RDP_USERNAME"
@@ -279,48 +282,74 @@ jobs:
               $showOnlyFilters = @{}
               $telemetryDisplayNames = @{}
               
+              $searchPaths = @()
               if (Test-Path $wsPath) {
-                  Get-ChildItem -Path $wsPath -Directory | ForEach-Object {
-                      $projDir = $_.FullName
-                      $projName = $_.Name
-                      
-                      # Resolve pseudo name if exists
-                      $displayName = $projName
-                      $pseudoFile = Get-ChildItem -Path $projDir -Filter "*.pseudo" | Select-Object -First 1
-                      if ($pseudoFile) {
-                          $displayName = $pseudoFile.BaseName
+                  $searchPaths += Get-ChildItem -Path $wsPath -Directory
+              }
+              $frameworkPaths = @("C:\state-repo\Repository\Privileged", "C:\state-repo\Repository\Initialized", "C:\state-repo\Repository\Essentials")
+              foreach ($fp in $frameworkPaths) {
+                  if (Test-Path $fp) {
+                      $searchPaths += [PSCustomObject]@{
+                          FullName = $fp
+                          Name = Split-Path $fp -Leaf
                       }
-                      
-                      $logNames = @()
-                      if (Test-Path $logDir) {
-                          Get-ChildItem -Path $logDir -Filter "$projName*.log" | ForEach-Object {
-                              if ($_.Name -eq "$projName.log" -or $_.Name.StartsWith("$projName-")) {
-                                  $logNames += $_.Name
-                                  $suffix = $_.Name.Substring($projName.Length)
+                  }
+              }
+              
+              $searchPaths | ForEach-Object {
+                  $projDir = $_.FullName
+                  $projName = $_.Name
+                  
+                  # Resolve pseudo name if exists
+                  $displayName = $projName
+                  $pseudoFile = Get-ChildItem -Path $projDir -Filter "*.pseudo" | Select-Object -First 1
+                  if ($pseudoFile) {
+                      $displayName = $pseudoFile.BaseName
+                  }
+                  
+                  $logNames = @()
+                  if (Test-Path $logDir) {
+                      Get-ChildItem -Path $logDir -Filter "$projName*.log" | ForEach-Object {
+                          if ($_.Name -eq "$projName.log" -or $_.Name.StartsWith("$projName-")) {
+                              $logNames += $_.Name
+                              $suffix = $_.Name.Substring($projName.Length)
+                              if ($displayName -eq "Clean") {
+                                  $telemetryDisplayNames[$_.Name] = "$projName$suffix"
+                              } else {
                                   $telemetryDisplayNames[$_.Name] = "$displayName$suffix"
                               }
                           }
                       }
-                      
-                      # Read explicitly owned custom log files from telemetry_logs.txt
-                      $customLogListFile = Join-Path $projDir "telemetry_logs.txt"
-                      if (Test-Path $customLogListFile) {
-                          Get-Content $customLogListFile | ForEach-Object {
-                              $l = $_.Trim()
-                              if (-not [string]::IsNullOrWhiteSpace($l) -and -not $l.StartsWith("#") -and $l.EndsWith(".log")) {
-                                  if (-not $logNames.Contains($l)) {
-                                      $logNames += $l
-                                      # For external logs, prefix the display name with the project alias
+                  }
+                  
+                  # Read explicitly owned custom log files from telemetry_logs.txt
+                  $customLogListFile = Join-Path $projDir "telemetry_logs.txt"
+                  if (Test-Path $customLogListFile) {
+                      Get-Content $customLogListFile | ForEach-Object {
+                          $l = $_.Trim()
+                          if (-not [string]::IsNullOrWhiteSpace($l) -and -not $l.StartsWith("#") -and $l.EndsWith(".log")) {
+                              if (-not $logNames.Contains($l)) {
+                                  $logNames += $l
+                                  # For external logs, prefix the display name with the project alias
+                                  if ($displayName -eq "Clean") {
+                                      $telemetryDisplayNames[$l] = $l
+                                  } else {
                                       $telemetryDisplayNames[$l] = "$displayName-$l"
                                   }
                               }
                           }
                       }
-                      if ($logNames.Count -eq 0) {
-                          $logNames = @("$projName.log", "$projName-Error.log")
+                  }
+                  if ($logNames.Count -eq 0) {
+                      $logNames = @("$projName.log", "$projName-Error.log")
+                      if ($displayName -eq "Clean") {
+                          $telemetryDisplayNames["$projName.log"] = "$projName.log"
+                          $telemetryDisplayNames["$projName-Error.log"] = "$projName-Error.log"
+                      } else {
                           $telemetryDisplayNames["$projName.log"] = "$displayName.log"
                           $telemetryDisplayNames["$projName-Error.log"] = "$displayName-Error.log"
                       }
+                  }
                       
                       # Check for Telemetry.false
                       if (Test-Path (Join-Path $projDir "Telemetry.false")) {
@@ -467,6 +496,7 @@ jobs:
         if: always()
         shell: powershell
         run: |
+          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
           Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
           $stateRepo = 'C:\state-repo'
           if (-not (Test-Path $stateRepo)) { exit 0 }
