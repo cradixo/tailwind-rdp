@@ -351,37 +351,36 @@ jobs:
                       }
                   }
                       
-                      # Check for Telemetry.false
-                      if (Test-Path (Join-Path $projDir "Telemetry.false")) {
-                          foreach ($ln in $logNames) {
-                              $telemetryBlocklist[$ln] = $true
+                  # Check for Telemetry.false
+                  if (Test-Path (Join-Path $projDir "Telemetry.false")) {
+                      foreach ($ln in $logNames) {
+                          $telemetryBlocklist[$ln] = $true
+                      }
+                  }
+                  
+                  # Check for telemetry_filters.txt
+                  $filterFile = Join-Path $projDir "telemetry_filters.txt"
+                  if (Test-Path $filterFile) {
+                      $hides = [System.Collections.Generic.List[string]]::new()
+                      $masks = [System.Collections.Generic.List[string]]::new()
+                      $showOnlys = [System.Collections.Generic.List[string]]::new()
+                      
+                      Get-Content $filterFile | ForEach-Object {
+                          $l = $_.Trim()
+                          if ([string]::IsNullOrWhiteSpace($l) -or $l.StartsWith("#")) { return }
+                          if ($l -match "^hide:(.+)$") {
+                              $hides.Add($Matches[1].Trim())
+                          } elseif ($l -match "^mask:(.+)$") {
+                              $masks.Add($Matches[1].Trim())
+                          } elseif ($l -match "^show-only:(.+)$") {
+                              $showOnlys.Add($Matches[1].Trim())
                           }
                       }
                       
-                      # Check for telemetry_filters.txt
-                      $filterFile = Join-Path $projDir "telemetry_filters.txt"
-                      if (Test-Path $filterFile) {
-                          $hides = [System.Collections.Generic.List[string]]::new()
-                          $masks = [System.Collections.Generic.List[string]]::new()
-                          $showOnlys = [System.Collections.Generic.List[string]]::new()
-                          
-                          Get-Content $filterFile | ForEach-Object {
-                              $l = $_.Trim()
-                              if ([string]::IsNullOrWhiteSpace($l) -or $l.StartsWith("#")) { return }
-                              if ($l -match "^hide:(.+)$") {
-                                  $hides.Add($Matches[1].Trim())
-                              } elseif ($l -match "^mask:(.+)$") {
-                                  $masks.Add($Matches[1].Trim())
-                              } elseif ($l -match "^show-only:(.+)$") {
-                                  $showOnlys.Add($Matches[1].Trim())
-                              }
-                          }
-                          
-                          foreach ($ln in $logNames) {
-                              if ($hides.Count -gt 0) { $hideFilters[$ln] = $hides }
-                              if ($masks.Count -gt 0) { $maskFilters[$ln] = $masks }
-                              if ($showOnlys.Count -gt 0) { $showOnlyFilters[$ln] = $showOnlys }
-                          }
+                      foreach ($ln in $logNames) {
+                          if ($hides.Count -gt 0) { $hideFilters[$ln] = $hides }
+                          if ($masks.Count -gt 0) { $maskFilters[$ln] = $masks }
+                          if ($showOnlys.Count -gt 0) { $showOnlyFilters[$ln] = $showOnlys }
                       }
                   }
               }
