@@ -73,7 +73,7 @@ jobs:
       - name: Install & Authenticate Tailscale VPN
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           $envVarName = "INSTALL_VPN"
           $toggleVal = [System.Environment]::GetEnvironmentVariable($envVarName, "Machine")
           if ($toggleVal -ne "true") {
@@ -138,7 +138,7 @@ jobs:
       - name: Checkout Cloud Repository (Database & Scripts)
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           Write-Host "Authenticating to Cloud Database..."
           $repoUrl = "https://$($env:BACKUP_DB_USER):$($env:BACKUP_DB_PAT)@github.com/$($env:BACKUP_DB_USER)/$($env:BACKUP_DB_REPO).git"
           
@@ -163,7 +163,7 @@ jobs:
       - name: Provision Local Administrator Account
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           $securePass = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
           New-LocalUser -Name "$env:RDP_USERNAME" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USERNAME"
@@ -173,7 +173,7 @@ jobs:
       - name: Initialize Logon Hooks & Background Daemons
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           $logonScript = @(
               '$initDir = "C:\state-repo\Repository\Initialized"',
               '$bootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString("yyyyMMdd-HHmm")',
@@ -212,7 +212,7 @@ jobs:
       - name: Execute Privileged Provisioning Scripts
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           $privilegedDir = "C:\state-repo\Repository\Privileged"
           if (Test-Path $privilegedDir) {
               Get-ChildItem -Path $privilegedDir -Filter "*.ps1" | Sort-Object Name | ForEach-Object {
@@ -240,7 +240,7 @@ jobs:
       - name: Execute Interactive Runtime & Telemetry Stream
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           Write-Host "================ SECURE VPN ENTRY ================"
           Write-Host "Routing IP : $env:TAILSCALE_IP"
           Write-Host "Identifier : $env:RDP_USERNAME"
@@ -496,7 +496,7 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          [System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object { [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") }
+          Invoke-Expression ('[System.Environment]::GetEnvironmentVariables("Machine").GetEnumerator() | ForEach-Object ' + [char]123 + ' [System.Environment]::SetEnvironmentVariable($_.Key, $_.Value, "Process") ' + [char]125)
           Write-Host "=== INITIATING EMERGENCY TEARDOWN ==="
           $stateRepo = 'C:\state-repo'
           if (-not (Test-Path $stateRepo)) { exit 0 }
