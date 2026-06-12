@@ -151,10 +151,14 @@ jobs:
           Write-Host "Cloud Repo connection established." -ForegroundColor Green
           icacls "C:\state-repo" /grant "Everyone:(OI)(CI)F" /T | Out-Null
           
-          # Clean up any residual lifecycle flags from previous sessions
+          # Clean up any residual lifecycle and sync flags from previous sessions
           if (Test-Path "C:\state-repo\end_run.flag") {
               Remove-Item "C:\state-repo\end_run.flag" -Force -ErrorAction SilentlyContinue
               Write-Host "Wiped residual end_run.flag from state-repo."
+          }
+          if (Test-Path "C:\state-repo\sync.lock") {
+              Remove-Item "C:\state-repo\sync.lock" -Force -ErrorAction SilentlyContinue
+              Write-Host "Wiped residual sync.lock from state-repo."
           }
 
       - name: Provision Local Administrator Account
@@ -264,7 +268,95 @@ jobs:
           }
           Write-Host "[TELEMETRY] Log baseline captured. Only live output from this session will be streamed."
           
+          $wsPath = "C:\state-repo\Repository\WorkSpace"
+          $literalMaskFilters = @{}
+          
           while ((Get-Date) -lt $endTime) {
+              # Scan/refresh telemetry blocklists and filters dynamically
+              $telemetryBlocklist = @{}
+              $hideFilters = @{}
+              $maskFilters = @{}
+              $showOnlyFilters = @{}
+              $telemetryDisplayNames = @{}
+              
+              if (Test-Path $wsPath) {
+                  Get-ChildItem -Path $wsPath -Directory | ForEach-Object {
+                      $projDir = $_.FullName
+                      $projName = $_.Name
+                      
+                      # Resolve pseudo name if exists
+                      $displayName = $projName
+                      $pseudoFile = Get-ChildItem -Path $projDir -Filter "*.pseudo" | Select-Object -First 1
+                      if ($pseudoFile) {
+                          $displayName = $pseudoFile.BaseName
+                      }
+                      
+                      $logNames = @()
+                      if (Test-Path $logDir) {
+                          Get-ChildItem -Path $logDir -Filter "$projName*.log" | ForEach-Object {
+                              if ($_.Name -eq "$projName.log" -or $_.Name.StartsWith("$projName-")) {
+                                  $logNames += $_.Name
+                                  $suffix = $_.Name.Substring($projName.Length)
+                                  $telemetryDisplayNames[$_.Name] = "$displayName$suffix"
+                              }
+                          }
+                      }
+                      
+                      # Read explicitly owned custom log files from telemetry_logs.txt
+                      $customLogListFile = Join-Path $projDir "telemetry_logs.txt"
+                      if (Test-Path $customLogListFile) {
+                          Get-Content $customLogListFile | ForEach-Object {
+                              $l = $_.Trim()
+                              if (-not [string]::IsNullOrWhiteSpace($l) -and -not $l.StartsWith("#") -and $l.EndsWith(".log")) {
+                                  if (-not $logNames.Contains($l)) {
+                                      $logNames += $l
+                                      # For external logs, prefix the display name with the project alias
+                                      $telemetryDisplayNames[$l] = "$displayName-$l"
+                                  }
+                              }
+                          }
+                      }
+                      if ($logNames.Count -eq 0) {
+                          $logNames = @("$projName.log", "$projName-Error.log")
+                          $telemetryDisplayNames["$projName.log"] = "$displayName.log"
+                          $telemetryDisplayNames["$projName-Error.log"] = "$displayName-Error.log"
+                      }
+                      
+                      # Check for Telemetry.false
+                      if (Test-Path (Join-Path $projDir "Telemetry.false")) {
+                          foreach ($ln in $logNames) {
+                              $telemetryBlocklist[$ln] = $true
+                          }
+                      }
+                      
+                      # Check for telemetry_filters.txt
+                      $filterFile = Join-Path $projDir "telemetry_filters.txt"
+                      if (Test-Path $filterFile) {
+                          $hides = [System.Collections.Generic.List[string]]::new()
+                          $masks = [System.Collections.Generic.List[string]]::new()
+                          $showOnlys = [System.Collections.Generic.List[string]]::new()
+                          
+                          Get-Content $filterFile | ForEach-Object {
+                              $l = $_.Trim()
+                              if ([string]::IsNullOrWhiteSpace($l) -or $l.StartsWith("#")) { return }
+                              if ($l -match "^hide:(.+)$") {
+                                  $hides.Add($Matches[1].Trim())
+                              } elseif ($l -match "^mask:(.+)$") {
+                                  $masks.Add($Matches[1].Trim())
+                              } elseif ($l -match "^show-only:(.+)$") {
+                                  $showOnlys.Add($Matches[1].Trim())
+                              }
+                          }
+                          
+                          foreach ($ln in $logNames) {
+                              if ($hides.Count -gt 0) { $hideFilters[$ln] = $hides }
+                              if ($masks.Count -gt 0) { $maskFilters[$ln] = $masks }
+                              if ($showOnlys.Count -gt 0) { $showOnlyFilters[$ln] = $showOnlys }
+                          }
+                      }
+                  }
+              }
+
               if ($saveRuntimeEnabled -and -not $isLoggedIn) {
                   $qwinsta = qwinsta 2>&1 | Out-String
                   if ($qwinsta -match "rdp-tcp#.*Active") {
@@ -297,7 +389,69 @@ jobs:
                           $reader = [System.IO.StreamReader]::new($fs)
                           while (-not $reader.EndOfStream) { 
                               $line = $reader.ReadLine()
-                              Write-Host "[$fileName] $line" 
+                              
+                              # Process dynamic <MASK>...</MASK>
+                              if ($line -match "<MASK>(.*?)</MASK>") {
+                                  $regexMatches = [regex]::Matches($line, "(?i)<MASK>(.*?)</MASK>")
+                                  foreach ($m in $regexMatches) {
+                                      $secret = $m.Groups[1].Value
+                                      if (-not [string]::IsNullOrWhiteSpace($secret)) {
+                                          if (-not $literalMaskFilters.ContainsKey($fileName)) {
+                                              $literalMaskFilters[$fileName] = [System.Collections.Generic.List[string]]::new()
+                                          }
+                                          if (-not $literalMaskFilters[$fileName].Contains($secret)) {
+                                              $literalMaskFilters[$fileName].Add($secret)
+                                          }
+                                      }
+                                  }
+                                  $line = [regex]::Replace($line, "(?i)<MASK>.*?</MASK>", "***")
+                              }
+                              
+                              # Skip if the log is in the telemetry blocklist
+                              if ($telemetryBlocklist.ContainsKey($fileName)) {
+                                  continue
+                              }
+                              
+                              # Check if we should only show specific lines
+                              if ($showOnlyFilters.ContainsKey($fileName)) {
+                                  $matchedShow = $false
+                                  foreach ($pattern in $showOnlyFilters[$fileName]) {
+                                      if ($line -match $pattern) {
+                                          $matchedShow = $true
+                                          break
+                                      }
+                                  }
+                                  if (-not $matchedShow) { continue }
+                              }
+                              
+                              # Check if the line matches any hide filters
+                              $skipLine = $false
+                              if ($hideFilters.ContainsKey($fileName)) {
+                                  foreach ($pattern in $hideFilters[$fileName]) {
+                                      if ($line -match $pattern) {
+                                          $skipLine = $true
+                                          break
+                                      }
+                                  }
+                              }
+                              if ($skipLine) { continue }
+                              
+                              # Apply mask filters
+                              if ($maskFilters.ContainsKey($fileName)) {
+                                  foreach ($pattern in $maskFilters[$fileName]) {
+                                      $line = $line -replace $pattern, '***'
+                                  }
+                              }
+                              
+                              # Apply literal mask filters
+                              if ($literalMaskFilters.ContainsKey($fileName)) {
+                                  foreach ($secret in $literalMaskFilters[$fileName]) {
+                                      $line = $line.Replace($secret, "***")
+                                  }
+                              }
+                              
+                              $printName = if ($telemetryDisplayNames.ContainsKey($fileName)) { $telemetryDisplayNames[$fileName] } else { $fileName }
+                              Write-Host "[$printName] $line" 
                           }
                           $logPositions[$fileName] = $fs.Position
                           $reader.Close()
@@ -307,6 +461,7 @@ jobs:
               }
               Start-Sleep -Seconds 5
           }
+
 
       - name: Finalize Session Persistence & State Synchronization
         if: always()
